@@ -22,21 +22,32 @@
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
 #if K15_USE_D3D12_DEBUG
-#define COM_LOG_ON_ERROR_HRESULT(func) logOnHResultError(func, #func, __FILE__, __LINE__)
+#define COM_CALL(func) logOnHResultError(func, #func, __FILE__, __LINE__)
 #else
-#define COM_LOG_ON_ERROR_HRESULT(func) func
+#define COM_CALL(func) func
 #endif
 
 #define COM_RELEASE(ptr)if(ptr != nullptr) { (ptr)->Release(); ptr = nullptr; }
 
+struct d3d12_swap_chain_t
+{
+    IDXGISwapChain4*    pSwapChain;
+    ID3D12Resource**    ppBackBuffers;
+    ID3D12Fence**       ppFrameFence;
+    uint8_t             backBufferCount;
+};
+
 struct d3d12_context_t
 {
-    ID3D12Device10*         pDevice;
-    ID3D12Debug6*           pDebugLayer;
-    ID3D12CommandQueue*     pDefaultCommandQueue;
-    ID3D12DescriptorHeap*   pRenderTargetViewDescriptorHeap;
-    IDXGISwapChain1*        pSwapChain;
-    IDXGIFactory6*          pFactory;
+    ID3D12Device10*             pDevice;
+    ID3D12Debug6*               pDebugLayer;
+    IDXGIFactory6*              pFactory;
+ 
+    d3d12_swap_chain_t          swapChain;
+    ID3D12CommandQueue*         pDefaultCommandQueue;
+    ID3D12CommandAllocator*     pDefaultCommandAllocator;
+    ID3D12GraphicsCommandList*  pDefaultGraphicsCommandList;
+    ID3D12DescriptorHeap*       pRenderTargetViewDescriptorHeap;
 };
 
 void printErrorToFile(const char* p_FileName)
@@ -65,7 +76,6 @@ void allocateDebugConsole()
 	AttachConsole(ATTACH_PARENT_PROCESS);
 	freopen("CONOUT$", "w", stdout);
 }
-
 
 void K15_WindowCreated(HWND p_HWND, UINT p_Message, WPARAM p_wParam, LPARAM p_lParam)
 {
@@ -109,9 +119,14 @@ LRESULT CALLBACK K15_WNDPROC(HWND p_HWND, UINT p_Message, WPARAM p_wParam, LPARA
 
 	case WM_CLOSE:
 		K15_WindowClosed(p_HWND, p_Message, p_wParam, p_lParam);
-		PostQuitMessage(0);
+        DestroyWindow(p_HWND);
 		messageHandled = true;
 		break;
+
+    case WM_DESTROY:
+		PostQuitMessage(0);
+		messageHandled = true;
+        break;
 
 	case WM_KEYDOWN:
 	case WM_KEYUP:
@@ -223,7 +238,7 @@ HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCal
 
 bool setupD3D12Device(ID3D12Device10** pOutDevice)
 {
-    if(COM_LOG_ON_ERROR_HRESULT(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(pOutDevice))) != S_OK)
+    if(COM_CALL(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(pOutDevice))) != S_OK)
     {
         return false;
     }
@@ -232,20 +247,33 @@ bool setupD3D12Device(ID3D12Device10** pOutDevice)
     return true;
 }
 
-bool setupD3D12DebugLayer(ID3D12Device* pDevice)
+bool enableD3D12DebugLayer(ID3D12Debug6** pOutDebugLayer)
 {
-    ID3D12InfoQueue* pInfoQueue = nullptr;
-    if(COM_LOG_ON_ERROR_HRESULT(pDevice->QueryInterface(IID_PPV_ARGS(&pInfoQueue))) != S_OK)
+    if(COM_CALL(D3D12GetDebugInterface(IID_PPV_ARGS(pOutDebugLayer))) != S_OK)
     {
         return false;
     }
 
-    if(COM_LOG_ON_ERROR_HRESULT(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE)) != S_OK)
+    (*pOutDebugLayer)->EnableDebugLayer();
+    (*pOutDebugLayer)->SetEnableAutoName(TRUE);
+
+    return true;
+}
+
+bool setupD3D12DebugLayer(ID3D12Device* pDevice)
+{
+    ID3D12InfoQueue* pInfoQueue = nullptr;
+    if(COM_CALL(pDevice->QueryInterface(IID_PPV_ARGS(&pInfoQueue))) != S_OK)
+    {
+        return false;
+    }
+
+    if(COM_CALL(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE)) != S_OK)
     {
         return false;
     }
     
-    if(COM_LOG_ON_ERROR_HRESULT(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE)) != S_OK)
+    if(COM_CALL(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE)) != S_OK)
     {
         return false;
     }
@@ -261,7 +289,7 @@ bool setupD3D12Factory(IDXGIFactory6** pOutFactory)
     factoryFlags = DXGI_CREATE_FACTORY_DEBUG;
 #endif
 
-    if(COM_LOG_ON_ERROR_HRESULT(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(pOutFactory))) != S_OK)
+    if(COM_CALL(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(pOutFactory))) != S_OK)
     {
         return false;
     }
@@ -269,25 +297,13 @@ bool setupD3D12Factory(IDXGIFactory6** pOutFactory)
     return true;
 }
 
-bool enableD3D12DebugLayer(ID3D12Debug6** pOutDebugLayer)
-{
-    if(COM_LOG_ON_ERROR_HRESULT(D3D12GetDebugInterface(IID_PPV_ARGS(pOutDebugLayer))) != S_OK)
-    {
-        return false;
-    }
-
-    (*pOutDebugLayer)->EnableDebugLayer();
-    (*pOutDebugLayer)->SetEnableAutoName(TRUE);
-    return true;
-}
-
-bool setupD3D12DefaultCommandQueue(ID3D12Device* pDevice, ID3D12CommandQueue** pOutCommandQueue)
+bool setupD3D12DirectCommandQueue(ID3D12Device* pDevice, ID3D12CommandQueue** pOutCommandQueue)
 {
     D3D12_COMMAND_QUEUE_DESC defaultCommandQueueDesc = {};
     defaultCommandQueueDesc.Type        = D3D12_COMMAND_LIST_TYPE_DIRECT;
     defaultCommandQueueDesc.Priority    = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
     defaultCommandQueueDesc.Flags       = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    if(COM_LOG_ON_ERROR_HRESULT(pDevice->CreateCommandQueue(&defaultCommandQueueDesc, IID_PPV_ARGS(pOutCommandQueue))) != S_OK)
+    if(COM_CALL(pDevice->CreateCommandQueue(&defaultCommandQueueDesc, IID_PPV_ARGS(pOutCommandQueue))) != S_OK)
     {
         return false;
     }
@@ -312,7 +328,7 @@ bool setupD3D12SwapChain(IDXGIFactory6* pFactory, ID3D12CommandQueue* pCommandQu
     swapChainDesc.AlphaMode     = DXGI_ALPHA_MODE_UNSPECIFIED;
     swapChainDesc.Flags         = 0;
     
-    if(COM_LOG_ON_ERROR_HRESULT(pFactory->CreateSwapChainForHwnd(pCommandQueue, pWindowHandle, &swapChainDesc, nullptr, nullptr, pOutSwapChain)) != S_OK)
+    if(COM_CALL(pFactory->CreateSwapChainForHwnd(pCommandQueue, pWindowHandle, &swapChainDesc, nullptr, nullptr, pOutSwapChain)) != S_OK)
     {
         return false;
     }
@@ -326,7 +342,39 @@ bool setupD3D12DescriptorHeap(ID3D12Device* pDevice, ID3D12DescriptorHeap** pOut
     descriptorHeapDesc.Type             = type;
     descriptorHeapDesc.NumDescriptors   = descriptorCount;
     descriptorHeapDesc.Flags            = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    if(COM_LOG_ON_ERROR_HRESULT(pDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(pOutDescriptorHeap))) != S_OK)
+    if(COM_CALL(pDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(pOutDescriptorHeap))) != S_OK)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool setupD3D12DirectCommandAllocator(ID3D12Device* pDevice, ID3D12CommandAllocator** pOutCommandAllocator)
+{
+    if(COM_CALL(pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(pOutCommandAllocator))) != S_OK)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool setupD3D12DirectGraphicsCommandList(ID3D12Device* pDevice, ID3D12CommandAllocator* pCommandAllocator, ID3D12GraphicsCommandList** pOutCommandList)
+{
+    if(COM_CALL(pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, pCommandAllocator, nullptr, IID_PPV_ARGS(pOutCommandList))) != S_OK)
+    {
+        return false;
+    }
+
+    (*pOutCommandList)->Close();
+
+    return true;
+}
+
+bool createD3D12Fence(ID3D12Device* pDevice, ID3D12Fence** pOutFence, const uint32_t initialValue)
+{
+    if(COM_CALL(pDevice->CreateFence(initialValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(pOutFence))) != S_OK)
     {
         return false;
     }
@@ -341,26 +389,12 @@ bool setupD3D12(d3d12_context_t* pDxContext, HWND pWindowHandle, const uint32_t 
         return false;
     }
 
-#if K15_USE_D3D12_DEBUG
-    if(!enableD3D12DebugLayer(&pDxContext->pDebugLayer))
-    {
-        return false;
-    }
-#endif
-
     if(!setupD3D12Device(&pDxContext->pDevice))
     {
         return false;
     }
 
-#if K15_USE_D3D12_DEBUG
-    if(!setupD3D12DebugLayer(pDxContext->pDevice))
-    {
-        return false;
-    }
-#endif
-
-    if(!setupD3D12DefaultCommandQueue(pDxContext->pDevice, &pDxContext->pDefaultCommandQueue))
+    if(!setupD3D12DirectCommandQueue(pDxContext->pDevice, &pDxContext->pDefaultCommandQueue))
     {
         return false;
     }
@@ -375,20 +409,65 @@ bool setupD3D12(d3d12_context_t* pDxContext, HWND pWindowHandle, const uint32_t 
         return false;
     }
 
+    if(!setupD3D12DirectCommandAllocator(pDxContext->pDevice, &pDxContext->pDefaultCommandAllocator))
+    {
+        return false;
+    }
+
+    if(!setupD3D12DirectGraphicsCommandList(pDxContext->pDevice, pDxContext->pDefaultCommandAllocator, &pDxContext->pDefaultGraphicsCommandList))
+    {
+        return false;
+    }
+
+    if(!createD3D12Fence(pDxContext->pDevice, &pDxContext->pGPUFrameFence, 0u))
+    {
+        return false;
+    }
+
     return true;
 }
 
-bool setup(d3d12_context_t* pDxContext, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight)
+bool setup(d3d12_context_t* pDxContext, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, bool useDebugLayer)
 {
-	//allocateDebugConsole();
-
     static constexpr uint32_t frameBufferCount = 3u;
-    return setupD3D12(pDxContext, pWindowHandle, windowWidth, windowHeight, frameBufferCount);
+    if(useDebugLayer)
+    {
+        useDebugLayer = enableD3D12DebugLayer(&pDxContext->pDebugLayer);
+    }
+
+    if(!setupD3D12(pDxContext, pWindowHandle, windowWidth, windowHeight, frameBufferCount))
+    {
+        return false;
+    }
+
+    if(useDebugLayer)
+    {
+        if(!setupD3D12DebugLayer(pDxContext->pDevice))
+        {
+
+        }
+    }
+
+    return true;
 }
 
-void doFrame(uint32_t p_DeltaTimeInMS)
+void doFrame(d3d12_context_t* pD3D12Context, uint32_t p_DeltaTimeInMS, uint32_t frameIndex)
 {
+    pD3D12Context->pDefaultCommandAllocator->Reset();
+    pD3D12Context->pDefaultGraphicsCommandList->Reset(pD3D12Context->pDefaultCommandAllocator, nullptr);
+    
+    IDXGISwapChain3* pSwapChain3 = nullptr;
+    pD3D12Context->pSwapChain->QueryInterface(IID_PPV_ARGS(&pSwapChain3));
 
+    ID3D12Resource* pBackBufferResource = nullptr;
+    const uint32_t backbufferIndex = pSwapChain3->GetCurrentBackBufferIndex();
+    pSwapChain3->GetBuffer(backbufferIndex, IID_PPV_ARGS(&pBackBufferResource));
+
+    pD3D12Context->pDefaultGraphicsCommandList->Close();
+    pD3D12Context->pDefaultCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pD3D12Context->pDefaultGraphicsCommandList);
+
+    pD3D12Context->pDefaultCommandQueue->Signal(pD3D12Context->pGPUFrameFence, frameIndex);
+    pD3D12Context->pSwapChain->Present(1, 0);
 }
 
 void clearD3D12Context(d3d12_context_t* pD3D12Context)
@@ -414,7 +493,8 @@ int CALLBACK WinMain(HINSTANCE hInstance,
 		return -1;
 
     d3d12_context_t d3d12Context = {};
-	if(!setup(&d3d12Context, hwnd, 1024, 768))
+    const bool useDebugLayer = true;
+	if(!setup(&d3d12Context, hwnd, 1024, 768, useDebugLayer))
     {
         clearD3D12Context(&d3d12Context);
         return -1;
@@ -427,11 +507,14 @@ int CALLBACK WinMain(HINSTANCE hInstance,
 	bool loopRunning = true;
 	MSG msg = {0};
 
+    HANDLE frameEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+    uint32_t frameIndex = 1u;
 	while (loopRunning)
 	{
 		timeFrameStarted = getTimeInMilliseconds(performanceFrequency);
 
-		while (PeekMessage(&msg, hwnd, 0, 0, PM_REMOVE) > 0)
+		while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE) > 0)
 		{
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
@@ -440,12 +523,16 @@ int CALLBACK WinMain(HINSTANCE hInstance,
 				loopRunning = false;
 		}
 
-
-		doFrame(deltaMs);
+		doFrame(&d3d12Context, deltaMs, frameIndex);
+        d3d12Context.pGPUFrameFence->SetEventOnCompletion(frameIndex, frameEvent);
+        WaitForSingleObject(frameEvent, INFINITE);
 
 		timeFrameEnded = getTimeInMilliseconds(performanceFrequency);
 		deltaMs = timeFrameEnded - timeFrameStarted;
+
+        ++frameIndex;
 	}
 
+    clearD3D12Context(&d3d12Context);
 	return 0;
 }
