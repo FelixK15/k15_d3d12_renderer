@@ -1,0 +1,5 @@
+*.obj
+*.exe
+build
+*.pdb
+*.bat.cached_path
