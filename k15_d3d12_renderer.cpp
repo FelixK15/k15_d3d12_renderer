@@ -15,11 +15,14 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#include "include/WinPixEventRuntime/pix3.h"
+
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "D3d12.lib")
 #pragma comment(lib, "DXGI.lib")
 #pragma comment(lib, "dxguid.lib")
+#pragma comment(lib, "bin/WinPixEventRuntime.lib")
 
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
@@ -50,8 +53,11 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 }
 
 #define ASSERT_DEBUG(x) ASSERT_DEBUG_MSG(x, nullptr)
+#define ASSERT_DEBUG_UNREACHABLE_CODE() ASSERT_DEBUG(false)
 
 struct memory_allocator_t;
+struct render_context_t;
+
 typedef void*(*allocate_from_memory_allocator_fnc)(memory_allocator_t*, uint64_t, uint64_t);
 typedef void(*free_from_memory_allocator_fnc)(memory_allocator_t*, void*);
 
@@ -103,6 +109,7 @@ struct d3d12_descriptor_heap_t
 struct d3d12_swap_chain_t
 {
     d3d12_descriptor_heap_t         backBufferRenderTargetDescriptorHeap;
+    memory_allocator_t*             pMemoryAllocator;
     render_target_t*                pBackBuffers;
     DXGISwapChainType*              pSwapChain;
     D3D12_CPU_DESCRIPTOR_HANDLE*    pBackBufferRenderTargetHandles;
@@ -112,25 +119,32 @@ struct d3d12_swap_chain_t
 
 struct render_pass_t
 {
-    ID3D12GraphicsCommandList* pGraphicsCommandList;
-    const char* pName;
-    bool isOpen;
+    ID3D12CommandAllocator*     pGraphicsCommandAllocator;
+    ID3D12GraphicsCommandList*  pGraphicsCommandList;
+    const char*                 pName;
+    bool                        isOpen;
+    render_pass_t*              pNext;
 };
 
 struct graphics_frame_t
 {
-    render_target_t*         pBackBuffer;
-    render_pass_t*           pRenderPassBuffer;
-    render_pass_t**          ppRenderPassesToExecute;
-    memory_allocator_t*      pMemoryAllocator;
-    uint64_t                 frameIndex;
-    uint32_t                 renderPassesToExecuteIndex;
-    uint32_t                 renderPassIndex;
-    uint32_t                 renderPassCount;
-    ID3D12Fence*             pFrameFence;
-    ID3D12CommandQueue*      pFrameCommandQueue;
-    ID3D12CommandAllocator*  pFrameCommandAllocator;
-    HANDLE                   pFrameFinishedEvent;
+    render_context_t*                       pRenderContext;
+    render_target_t*                        pBackBuffer;
+    render_pass_t*                          pRenderPassBuffer;
+    memory_allocator_t*                     pMemoryAllocator;
+    render_pass_t*                          pFirstRenderPassToExecute;
+    render_pass_t*                          pLastRenderPassToExecute;
+    uint64_t                                frameIndex;
+    uint32_t                                renderPassIndex;
+    uint32_t                                renderPassCount;
+    uint32_t                                openRenderPassCount;
+    ID3D12Fence*                            pFrameFence;
+    ID3D12GraphicsCommandList*              pFrameGeneralCopyQueue;
+    ID3D12GraphicsCommandList*              pFrameGeneralGraphicsQueue;
+    ID3D12CommandAllocator*                 pFrameGeneralCopyCommandAllocator;
+    ID3D12CommandAllocator*                 pFrameGeneralGraphicsCommandAllocator;
+    ID3D12CommandQueue*                     pFrameCommandQueue;
+    HANDLE                                  pFrameFinishedEvent;
 };
 
 struct graphics_frame_collection_t
@@ -138,6 +152,14 @@ struct graphics_frame_collection_t
     memory_allocator_t* pMemoryAllocator;
     graphics_frame_t*   pGraphicsFrames;
     uint8_t             frameCount;
+};
+
+struct graphics_frame_parameters_t
+{
+    uint32_t maxRenderPassCount;
+    uint32_t maxDirectAllocatorCount;
+    uint32_t maxCopyAllocatorCount;
+    uint32_t maxComputeAllocatorCount;
 };
 
 struct render_context_t
@@ -194,6 +216,30 @@ enum assert_result_t
     assert_result_exit
 };
 
+assert_result_t handleAssert(const char* pExpression, const char* pUserMessage)
+{
+    char messageBuffer[1024] = {0};
+    if(pUserMessage == nullptr)
+    {
+        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n\nPress Try to continue\nPress Continue to debug\nPress Cancel to exit application.", pExpression);
+    }
+    else
+    {
+        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n===============\n%s\n===============\n\nPress Try to continue\nPress Continue to debug\nPress Cancel to exit application.", pExpression, pUserMessage);
+    }
+    const int messageBoxResult = MessageBoxA(nullptr, messageBuffer, "DEBUG ASSERT", MB_CANCELTRYCONTINUE | MB_ICONERROR | MB_DEFBUTTON1);
+    if(messageBoxResult == IDCANCEL)
+    {
+        return assert_result_exit;
+    }
+    else if(messageBoxResult == IDCONTINUE)
+    {
+        return assert_result_continue;
+    }
+
+    return assert_result_debug;
+}
+
 const char* getHResultString(HRESULT result)
 {
     switch(result)
@@ -226,14 +272,21 @@ const char* getHResultString(HRESULT result)
     return "unknown";
 }
 
+void addBeginMarker(ID3D12GraphicsCommandList* pCommandList, const char* pName)
+{
+    PIXBeginEvent(pCommandList, PIX_COLOR(100, 100, 100), pName);
+}
+
+void addEndMarker(ID3D12GraphicsCommandList* pCommandList)
+{
+    PIXEndEvent(pCommandList);
+}
+
 void setD3D12ObjectDebugName(ID3D12Object* pObject, const char* pName)
 {
-    const UINT nameLength = (UINT)strlen(pName);
-
-    if(nameLength > 0)
-    {
-        pObject->SetPrivateData(WKPDID_D3DDebugObjectName, nameLength + 1, pName);
-    }
+    wchar_t wideNameBuffer[256] = {};
+    mbstowcs(wideNameBuffer, pName, sizeof(wideNameBuffer) / sizeof(wchar_t));
+    pObject->SetName(wideNameBuffer);
 }
 
 template<typename T>
@@ -251,30 +304,6 @@ HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCal
     }
 
     return originalResult;
-}
-
-assert_result_t handleAssert(const char* pExpression, const char* pUserMessage)
-{
-    char messageBuffer[1024] = {0};
-    if(pUserMessage == nullptr)
-    {
-        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n\nPress Try to continue\nPress Continue to debug\nPress Cancel to exit application.", pExpression);
-    }
-    else
-    {
-        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n===============\n%s\n===============\n\nPress Try to continue\nPress Continue to debug\nPress Cancel to exit application.", pExpression, pUserMessage);
-    }
-    const int messageBoxResult = MessageBoxA(nullptr, messageBuffer, "DEBUG ASSERT", MB_CANCELTRYCONTINUE | MB_ICONERROR | MB_DEFBUTTON1);
-    if(messageBoxResult == IDCANCEL)
-    {
-        return assert_result_exit;
-    }
-    else if(messageBoxResult == IDCONTINUE)
-    {
-        return assert_result_continue;
-    }
-
-    return assert_result_debug;
 }
 
 void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, alloc_flags_t flags = alloc_flags_t::none)
@@ -630,6 +659,12 @@ bool createDirectCommandQueue(D3D12DeviceType* pDevice, ID3D12CommandQueue** pOu
     return true;
 }
 
+void destroyDescriptorHeap(d3d12_descriptor_heap_t* pDescriptorHeap)
+{
+    COM_RELEASE(pDescriptorHeap->pDescriptorHeap);
+    clearMemoryWithZeroes(pDescriptorHeap);
+}
+
 bool createDescriptorHeap(d3d12_descriptor_heap_t* pOutDescriptorHeap, D3D12DeviceType* pDevice, D3D12_DESCRIPTOR_HEAP_TYPE type, const uint32_t descriptorCount )
 {
     ID3D12DescriptorHeap* pDescriptorHeap = nullptr;
@@ -657,7 +692,19 @@ bool createDescriptorHeap(d3d12_descriptor_heap_t* pOutDescriptorHeap, D3D12Devi
     return true;
 }
 
-bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pAllocator, IDXGIFactory6* pFactory, D3D12DeviceType* pDevice, ID3D12CommandQueue* pCommandQueue, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, const uint32_t frameBufferCount)
+void destroySwapChain(d3d12_swap_chain_t* pSwapChain)
+{
+    COM_RELEASE(pSwapChain->pSwapChain);
+    for(uint32_t bufferIndex = 0u; bufferIndex < pSwapChain->backBufferCount; ++bufferIndex)
+    {
+        destroyRenderTarget(&pSwapChain->pBackBuffers[bufferIndex]);
+    }
+
+    freeFromAllocator(pSwapChain->pMemoryAllocator, pSwapChain->pBackBuffers);
+    destroyDescriptorHeap(&pSwapChain->backBufferRenderTargetDescriptorHeap);
+}
+
+bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pMemoryAllocator, IDXGIFactory6* pFactory, D3D12DeviceType* pDevice, ID3D12CommandQueue* pCommandQueue, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, const uint32_t frameBufferCount)
 {
     DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
     swapChainDesc.BufferCount   = frameBufferCount;
@@ -672,15 +719,13 @@ bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pAll
     swapChainDesc.AlphaMode     = DXGI_ALPHA_MODE_UNSPECIFIED;
     swapChainDesc.Flags         = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     
+    d3d12_swap_chain_t swapChain = {};
+    swapChain.backBufferCount = frameBufferCount;
+    swapChain.pMemoryAllocator = pMemoryAllocator;
+
     com_auto_release_t<IDXGISwapChain1> pTempSwapChain = nullptr;
-    DXGISwapChainType* pSwapChain = nullptr;
-    render_target_t* pFrameBuffers = nullptr;
-    d3d12_descriptor_heap_t renderTargetDescriptorHeap = {};
-    HANDLE* ppFrameEvents = nullptr;
-    ID3D12Fence** ppFrameFences = nullptr;
-    ID3D12CommandAllocator** ppFrameCommandAllocators = nullptr;
     
-    if(!createDescriptorHeap(&renderTargetDescriptorHeap, pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, frameBufferCount))
+    if(!createDescriptorHeap(&swapChain.backBufferRenderTargetDescriptorHeap, pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, frameBufferCount))
     {
         goto cleanup_and_exit_failure;
     }
@@ -690,69 +735,43 @@ bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pAll
         goto cleanup_and_exit_failure;
     }
 
-    if(COM_CALL(pTempSwapChain->QueryInterface(IID_PPV_ARGS(&pSwapChain))) != S_OK)
+    if(COM_CALL(pTempSwapChain->QueryInterface(IID_PPV_ARGS(&swapChain.pSwapChain))) != S_OK)
     {
         goto cleanup_and_exit_failure;
     }
 
-    pFrameBuffers = (render_target_t*)allocateFromAllocator(pAllocator, sizeof(render_target_t) * frameBufferCount);
-    ppFrameFences = (ID3D12Fence**)allocateFromAllocator(pAllocator, sizeof(void*) * frameBufferCount);
-    ppFrameEvents = (HANDLE*)allocateFromAllocator(pAllocator, sizeof(HANDLE) * frameBufferCount);
-    ppFrameCommandAllocators = (ID3D12CommandAllocator**)allocateFromAllocator(pAllocator, sizeof(void*) * frameBufferCount);
-    if(pFrameBuffers == nullptr || ppFrameFences == nullptr || ppFrameEvents == nullptr || ppFrameCommandAllocators == nullptr)
+    swapChain.pBackBuffers = (render_target_t*)allocateFromAllocator(pMemoryAllocator, sizeof(render_target_t) * frameBufferCount);
+    if(swapChain.pBackBuffers == nullptr)
     {
         goto cleanup_and_exit_failure;
     }
 
     for(uint32_t bufferIndex = 0u; bufferIndex < frameBufferCount; ++bufferIndex)
     {
-        if(COM_CALL(pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ppFrameFences[bufferIndex]))) != S_OK)
-        {
-            goto cleanup_and_exit_failure;
-        }
-
         ID3D12Resource* pFrameBuffer = nullptr;
-        if(COM_CALL(pSwapChain->GetBuffer(bufferIndex, IID_PPV_ARGS(&pFrameBuffer))) != S_OK)
+        if(COM_CALL(swapChain.pSwapChain->GetBuffer(bufferIndex, IID_PPV_ARGS(&pFrameBuffer))) != S_OK)
         {
             goto cleanup_and_exit_failure;
         }
 
-        ID3D12CommandAllocator* pCommandAllocator = nullptr;
-        if(COM_CALL(pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&ppFrameCommandAllocators[bufferIndex]))) != S_OK)
-        {
-            goto cleanup_and_exit_failure;
-        }
-
-        D3D12_CPU_DESCRIPTOR_HANDLE descriptorHandle = getNextCPUDescriptorHandle(&renderTargetDescriptorHeap);
+        setD3D12ObjectDebugName(pFrameBuffer, "Frame Buffer");
+        D3D12_CPU_DESCRIPTOR_HANDLE descriptorHandle = getNextCPUDescriptorHandle(&swapChain.backBufferRenderTargetDescriptorHeap);
         pDevice->CreateRenderTargetView(pFrameBuffer, nullptr, descriptorHandle);
 
-        initializeRenderTarget(&pFrameBuffers[bufferIndex], pFrameBuffer, &descriptorHandle, D3D12_RESOURCE_STATE_PRESENT);
-
-        ppFrameEvents[bufferIndex] = CreateEvent(nullptr, FALSE, TRUE, nullptr);
+        initializeRenderTarget(&swapChain.pBackBuffers[bufferIndex], pFrameBuffer, &descriptorHandle, D3D12_RESOURCE_STATE_PRESENT);
     }
     
-    pOutSwapChain->backBufferCount = frameBufferCount;
-    pOutSwapChain->pBackBuffers = pFrameBuffers;
-    pOutSwapChain->pSwapChain = pSwapChain;
-    pOutSwapChain->backBufferRenderTargetDescriptorHeap = renderTargetDescriptorHeap;
+    *pOutSwapChain = swapChain;
     return true;
 
     cleanup_and_exit_failure:
-        COM_RELEASE(pSwapChain);
-        for(uint32_t bufferIndex = 0; bufferIndex < frameBufferCount; ++bufferIndex)
-        {
-            destroyRenderTarget(&pFrameBuffers[bufferIndex]);
-            ppFrameFences[bufferIndex]->Release();
-        }
-
-        freeFromAllocator(pAllocator, pFrameBuffers);
-        freeFromAllocator(pAllocator, ppFrameFences);
+        destroySwapChain(&swapChain);
         return false;
 }
 
-bool createDirectCommandAllocator(D3D12DeviceType* pDevice, ID3D12CommandAllocator** pOutCommandAllocator)
+bool createCommandAllocator(D3D12DeviceType* pDevice, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator** pOutCommandAllocator)
 {
-    if(COM_CALL(pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(pOutCommandAllocator))) != S_OK)
+    if(COM_CALL(pDevice->CreateCommandAllocator(type, IID_PPV_ARGS(pOutCommandAllocator))) != S_OK)
     {
         return false;
     }
@@ -760,9 +779,9 @@ bool createDirectCommandAllocator(D3D12DeviceType* pDevice, ID3D12CommandAllocat
     return true;
 }
 
-bool createDirectGraphicsCommandList(D3D12DeviceType* pDevice, ID3D12CommandAllocator* pCommandAllocator, ID3D12GraphicsCommandList** pOutCommandList)
+bool createCommandList(D3D12DeviceType* pDevice, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator* pCommandAllocator, ID3D12GraphicsCommandList** pOutCommandList)
 {
-    if(COM_CALL(pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, pCommandAllocator, nullptr, IID_PPV_ARGS(pOutCommandList))) != S_OK)
+    if(COM_CALL(pDevice->CreateCommandList(0, type, pCommandAllocator, nullptr, IID_PPV_ARGS(pOutCommandList))) != S_OK)
     {
         return false;
     }
@@ -793,12 +812,15 @@ void destroyGraphicsFrame(graphics_frame_t* pGraphicsFrame)
     for(uint32_t renderPassIndex = 0u; renderPassIndex < pGraphicsFrame->renderPassCount; ++renderPassIndex)
     {
         COM_RELEASE(pGraphicsFrame->pRenderPassBuffer[renderPassIndex].pGraphicsCommandList);
+        COM_RELEASE(pGraphicsFrame->pRenderPassBuffer[renderPassIndex].pGraphicsCommandAllocator);
     }
 
     freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->pRenderPassBuffer);
-    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->ppRenderPassesToExecute);
 
-    COM_RELEASE(pGraphicsFrame->pFrameCommandAllocator);
+    COM_RELEASE(pGraphicsFrame->pFrameGeneralCopyCommandAllocator);
+    COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator);
+    COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsQueue);
+    COM_RELEASE(pGraphicsFrame->pFrameGeneralCopyQueue);
     COM_RELEASE(pGraphicsFrame->pFrameCommandQueue);
     COM_RELEASE(pGraphicsFrame->pFrameFence);   
 }
@@ -814,10 +836,15 @@ void destroyGraphicsFrameCollection(graphics_frame_collection_t* pGraphicsFrameC
     freeFromAllocator(pGraphicsFrameCollection->pMemoryAllocator, pGraphicsFrameCollection->pGraphicsFrames);
 }
 
-bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice, const uint32_t renderPassCount)
+bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice)
 {
+    ASSERT_DEBUG(pGraphicsFrameParameters != nullptr);
     ASSERT_DEBUG(pMemoryAllocator != nullptr);
     ASSERT_DEBUG(pDevice != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->maxRenderPassCount > 0u);
+    ASSERT_DEBUG(pGraphicsFrameParameters->maxComputeAllocatorCount > 0u);
+    ASSERT_DEBUG(pGraphicsFrameParameters->maxCopyAllocatorCount > 0u);
+    ASSERT_DEBUG(pGraphicsFrameParameters->maxDirectAllocatorCount > 0u);
 
     graphics_frame_t graphicsFrame = {0};
     graphicsFrame.pMemoryAllocator = pMemoryAllocator;
@@ -827,36 +854,47 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, memory_allocator_t*
         return false;
     }
 
-    render_pass_t* pRenderPasses = (render_pass_t*)allocateFromAllocator(pMemoryAllocator, (sizeof(render_pass_t) * renderPassCount), alloc_flags_t::clear_memory);
+    render_pass_t* pRenderPasses = (render_pass_t*)allocateFromAllocator(pMemoryAllocator, (sizeof(render_pass_t) * pGraphicsFrameParameters->maxRenderPassCount), alloc_flags_t::clear_memory);
     if(pRenderPasses == nullptr)
     {
         goto cleanup_and_exit_failure;
     }
 
-    render_pass_t** ppRenderPasses = (render_pass_t**)allocateFromAllocator(pMemoryAllocator, sizeof(void*) * renderPassCount, alloc_flags_t::clear_memory);
-    if(ppRenderPasses == nullptr)
+    if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, &graphicsFrame.pFrameGeneralGraphicsCommandAllocator))
     {
         goto cleanup_and_exit_failure;
     }
 
-    if(!createDirectCommandAllocator(pDevice, &graphicsFrame.pFrameCommandAllocator))
+    if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_COPY, &graphicsFrame.pFrameGeneralCopyCommandAllocator))
     {
         goto cleanup_and_exit_failure;
     }
 
-    for(uint32_t renderPassIndex = 0u; renderPassIndex < renderPassCount; ++renderPassIndex)
+    if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, graphicsFrame.pFrameGeneralGraphicsCommandAllocator, &graphicsFrame.pFrameGeneralGraphicsQueue))
     {
-        if(!createDirectGraphicsCommandList(pDevice, graphicsFrame.pFrameCommandAllocator, &pRenderPasses[renderPassIndex].pGraphicsCommandList))
+        goto cleanup_and_exit_failure;
+    }
+
+    if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_COPY, graphicsFrame.pFrameGeneralCopyCommandAllocator, &graphicsFrame.pFrameGeneralCopyQueue))
+    {
+        goto cleanup_and_exit_failure;
+    }
+
+    for(uint32_t renderPassIndex = 0u; renderPassIndex < pGraphicsFrameParameters->maxRenderPassCount; ++renderPassIndex)
+    {
+        if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, &pRenderPasses[renderPassIndex].pGraphicsCommandAllocator))
+        {
+            goto cleanup_and_exit_failure;
+        }
+
+        if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, pRenderPasses[renderPassIndex].pGraphicsCommandAllocator, &pRenderPasses[renderPassIndex].pGraphicsCommandList))
         {
             goto cleanup_and_exit_failure;
         }
     }
 
-    graphicsFrame.pRenderPassBuffer             = pRenderPasses;
-    graphicsFrame.ppRenderPassesToExecute       = ppRenderPasses;
-    graphicsFrame.renderPassesToExecuteIndex    = 0;
-    graphicsFrame.renderPassIndex               = 0;
-    graphicsFrame.renderPassCount               = renderPassCount;
+    graphicsFrame.pRenderPassBuffer = pRenderPasses;
+    graphicsFrame.renderPassCount   = pGraphicsFrameParameters->maxRenderPassCount;
 
     if(!createFence(pDevice, &graphicsFrame.pFrameFence, 0))
     {
@@ -884,7 +922,12 @@ bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrame
 
     for(uint32_t frameIndex = 0u; frameIndex < frameBufferCount; ++frameIndex)
     {
-        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], pMemoryAllocator, pDevice, 2u))
+        graphics_frame_parameters_t graphicsFrameParameters = {};
+        graphicsFrameParameters.maxRenderPassCount          = 64u;
+        graphicsFrameParameters.maxComputeAllocatorCount    = 32u;
+        graphicsFrameParameters.maxDirectAllocatorCount     = 128u;
+        graphicsFrameParameters.maxCopyAllocatorCount       = 8u;
+        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], &graphicsFrameParameters, pMemoryAllocator, pDevice))
         {
             goto cleanup_and_exit_failure;
         }
@@ -962,13 +1005,14 @@ graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
     const uint64_t frameIndex = pRenderContext->frameIndex % pRenderContext->graphicsFramesCollection.frameCount;
 
     graphics_frame_t* pGraphicsFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
-    HANDLE pFrameFinishedEvent = pGraphicsFrame->pFrameFinishedEvent;
-    ID3D12CommandAllocator* pFrameCommandAllocator = pGraphicsFrame->pFrameCommandAllocator;
 
-    const DWORD waitResult = WaitForSingleObject(pFrameFinishedEvent, INFINITE);
+    const DWORD waitResult = WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
     ASSERT_DEBUG(waitResult == WAIT_OBJECT_0);
-    
-    COM_CALL(pFrameCommandAllocator->Reset());
+
+    COM_CALL(pGraphicsFrame->pFrameGeneralCopyCommandAllocator->Reset());
+    COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator->Reset());
+    COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsQueue->Reset(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator, nullptr));
+    COM_CALL(pGraphicsFrame->pFrameGeneralCopyQueue->Reset(pGraphicsFrame->pFrameGeneralCopyCommandAllocator, nullptr));
 
     const uint32_t currentBackBufferIndex = pRenderContext->swapChain.pSwapChain->GetCurrentBackBufferIndex();
 
@@ -984,14 +1028,24 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
     ASSERT_DEBUG(pRenderContext != nullptr);
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pRenderContext->pCurrentGraphicsFrame == pGraphicsFrame);
+    ASSERT_DEBUG(pGraphicsFrame->openRenderPassCount == 0u);
 
-    for(uint32_t renderPassIndex = 0u; renderPassIndex < pGraphicsFrame->renderPassesToExecuteIndex; ++renderPassIndex)
+    const uint32_t frameBufferIndex = pRenderContext->swapChain.pSwapChain->GetCurrentBackBufferIndex();
+    transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pRenderContext->swapChain.pBackBuffers[frameBufferIndex].resource, D3D12_RESOURCE_STATE_PRESENT);
+
+    pGraphicsFrame->pFrameGeneralGraphicsQueue->Close();
+    pGraphicsFrame->pFrameGeneralCopyQueue->Close();
+    pRenderContext->pDefaultCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pGraphicsFrame->pFrameGeneralGraphicsQueue);
+
+    render_pass_t* pRenderPass = pGraphicsFrame->pFirstRenderPassToExecute;
+    while(pRenderPass)
     {
-        render_pass_t* pRenderPass = pGraphicsFrame->ppRenderPassesToExecute[renderPassIndex];
         pRenderContext->pDefaultCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pRenderPass->pGraphicsCommandList);
+        pRenderPass = pRenderPass->pNext;
     }
-
-    pGraphicsFrame->renderPassesToExecuteIndex = 0;
+    
+    pGraphicsFrame->pFirstRenderPassToExecute = nullptr;
+    pGraphicsFrame->pLastRenderPassToExecute = nullptr;
     pGraphicsFrame->renderPassIndex = 0;
 
     COM_CALL(pRenderContext->swapChain.pSwapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
@@ -1013,11 +1067,15 @@ render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRe
 
     render_pass_t* pRenderPass = pGraphicsFrame->pRenderPassBuffer + pGraphicsFrame->renderPassIndex;
     pGraphicsFrame->renderPassIndex = nextRenderPassIndex;
+    ++pGraphicsFrame->openRenderPassCount;
     
-    COM_CALL(pRenderPass->pGraphicsCommandList->Reset(pGraphicsFrame->pFrameCommandAllocator, nullptr));
+    COM_CALL(pRenderPass->pGraphicsCommandAllocator->Reset());
+    COM_CALL(pRenderPass->pGraphicsCommandList->Reset(pRenderPass->pGraphicsCommandAllocator, nullptr));
     pRenderPass->isOpen = true;
+    pRenderPass->pName = pRenderPassName;
 
     setD3D12ObjectDebugName(pRenderPass->pGraphicsCommandList, pRenderPassName);    
+    addBeginMarker(pRenderPass->pGraphicsCommandList, pRenderPassName);
     return pRenderPass;
 }
 
@@ -1025,11 +1083,15 @@ void endRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderPass)
 {
     ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pGraphicsFrame->openRenderPassCount > 0);
     ASSERT_DEBUG(pRenderPass->isOpen);
 
     pRenderPass->isOpen = false;
+    --pGraphicsFrame->openRenderPassCount;
 
     transitionResource(pRenderPass->pGraphicsCommandList, &pGraphicsFrame->pBackBuffer->resource, D3D12_RESOURCE_STATE_PRESENT);
+
+    addEndMarker(pRenderPass->pGraphicsCommandList);
     COM_CALL(pRenderPass->pGraphicsCommandList->Close());
 }
 
@@ -1058,17 +1120,85 @@ void executeRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderP
     ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(!pRenderPass->isOpen);
 
-    const uint32_t nextRenderPassToExecuteIndex = (pGraphicsFrame->renderPassesToExecuteIndex + 1);
-    if(nextRenderPassToExecuteIndex >= pGraphicsFrame->renderPassCount)
+    if(pGraphicsFrame->pFirstRenderPassToExecute == nullptr)
     {
-        return;
+        pGraphicsFrame->pFirstRenderPassToExecute = pRenderPass;
     }
 
-    pGraphicsFrame->ppRenderPassesToExecute[pGraphicsFrame->renderPassesToExecuteIndex] = pRenderPass;
-    pGraphicsFrame->renderPassesToExecuteIndex = nextRenderPassToExecuteIndex;
+    if(pGraphicsFrame->pLastRenderPassToExecute == nullptr)
+    {
+        pGraphicsFrame->pLastRenderPassToExecute = pRenderPass;
+    }
+    else
+    {
+        pGraphicsFrame->pLastRenderPassToExecute->pNext = pRenderPass;
+        pGraphicsFrame->pLastRenderPassToExecute = pRenderPass;
+    }
 }
 
-void renderFrame(HWND hwnd, render_context_t* pRenderContext, graphics_frame_t* pGraphicsFrame)
+struct upload_buffer_t
+{
+    const void* pData;
+    uint32_t sizeInBytes;
+
+    d3d12_resource_t uploadHeapResource;
+};
+
+void createVertexBuffer(graphics_frame_t* pGraphicsFrame, upload_buffer_t* pUploadBuffer)
+{
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment  = 0u;
+    desc.Width      = pUploadBuffer->sizeInBytes;
+    
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    
+    ID3D12Resource* pResource = nullptr;
+    pGraphicsFrame->pRenderContext->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, nullptr, nullptr, IID_PPV_ARGS(&pResource));
+}
+
+upload_buffer_t* getNextFreeUploadBuffer(graphics_frame_t* pGraphicsFrame)
+{
+    return nullptr;
+}
+
+upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, const void* pData, const size_t dataSizeInBytes)
+{
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment  = 0u;
+    desc.Width      = dataSizeInBytes;
+    
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    
+    ID3D12Resource* pResource = nullptr;
+    pGraphicsFrame->pRenderContext->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, nullptr, IID_PPV_ARGS(&pResource));
+
+    D3D12_RANGE readWriteRange = {};
+    readWriteRange.Begin = 0u;
+    readWriteRange.End = dataSizeInBytes;
+
+    void* pMappedData = nullptr;
+    COM_CALL(pResource->Map(0u, &readWriteRange, &pMappedData));
+    memcpy(pMappedData, pData, dataSizeInBytes);
+    pResource->Unmap(0u, &readWriteRange);
+
+    upload_buffer_t* pUploadBuffer = getNextFreeUploadBuffer(pGraphicsFrame);
+    pUploadBuffer->pData = pData;
+    pUploadBuffer->sizeInBytes = (uint32_t)dataSizeInBytes;
+    pUploadBuffer->uploadHeapResource.currentState = D3D12_RESOURCE_STATE_GENERIC_READ;
+    pUploadBuffer->uploadHeapResource.pResource = pResource;
+
+    return pUploadBuffer;
+}
+
+void renderFrame(HWND hwnd, graphics_frame_t* pGraphicsFrame)
 {
     POINT cursorPos;
     RECT clientRect;
@@ -1080,9 +1210,22 @@ void renderFrame(HWND hwnd, render_context_t* pRenderContext, graphics_frame_t* 
 
     const FLOAT backBufferRGBA[4] = {r, g, 0.2f, 1.0f};
 
-    render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Default");
+    render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Clear Background");
     clearColorRenderTarget(pRenderPass, pGraphicsFrame->pBackBuffer, r, g, 0.2f, 1.0f);
     endRenderPass(pGraphicsFrame, pRenderPass);
+
+    const float triangleVertices[] = {
+        0.0f, 0.0f, 0.0f,
+        0.5f, 1.0f, 0.0f,
+        1.0f, 0.0f, 0.0f
+    };
+
+    //render_pass_t* pDrawRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle");
+    
+    #if 0
+    upload_buffer_t* pVertexBufferData = createUploadBuffer(pGraphicsFrame, triangleVertices, sizeof(triangleVertices));
+    createVertexBuffer(pGraphicsFrame, pVertexBufferData)
+    #endif
 
     executeRenderPass(pGraphicsFrame, pRenderPass);
 }
@@ -1090,7 +1233,7 @@ void renderFrame(HWND hwnd, render_context_t* pRenderContext, graphics_frame_t* 
 void doFrame(HWND hwnd, render_context_t* pRenderContext)
 {
     graphics_frame_t* pFrame = beginNextFrame(pRenderContext);
-    renderFrame(hwnd, pRenderContext, pFrame);
+    renderFrame(hwnd, pFrame);
     finishFrame(pRenderContext, pFrame);
 }
 
@@ -1102,23 +1245,6 @@ void destroyFence(ID3D12Fence* pFence)
 void destroyCommandAllocator(ID3D12CommandAllocator* pCommandAllocator)
 {
     COM_RELEASE(pCommandAllocator);
-}
-
-void destroyDescriptorHeap(d3d12_descriptor_heap_t* pDescriptorHeap)
-{
-    COM_RELEASE(pDescriptorHeap->pDescriptorHeap);
-    clearMemoryWithZeroes(pDescriptorHeap);
-}
-
-void destroySwapChain(d3d12_swap_chain_t* pSwapChain)
-{
-    for(uint32_t bufferIndex = 0u; bufferIndex < pSwapChain->backBufferCount; ++bufferIndex)
-    {
-        destroyRenderTarget(&pSwapChain->pBackBuffers[bufferIndex]);
-    }
-
-    destroyDescriptorHeap(&pSwapChain->backBufferRenderTargetDescriptorHeap);
-    clearMemoryWithZeroes(pSwapChain);
 }
 
 void shutdownRenderContext(render_context_t* pRenderContext)

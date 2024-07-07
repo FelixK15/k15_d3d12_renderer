@@ -153,6 +153,13 @@ if not ERRORLEVEL 0 (
     echo build script exited with error !errorlevel!
 )
 
+if ERRORLEVEL 0 (
+    set PIX_DLL_PATH=!SOURCE_FOLDER!bin\WinPixEventRuntime.dll
+    if not exist "!PIX_DLL_PATH!" (
+        xcopy /Q /Y "!PIX_DLL_PATH!" "!OUTPUT_FOLDER!"
+    )
+)
+
 exit /b !errorlevel!
 
 :ERROR_FAILURE
