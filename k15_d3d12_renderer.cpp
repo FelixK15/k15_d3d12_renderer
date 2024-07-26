@@ -8,6 +8,7 @@
 #define D3DCOMPILE_DEBUG 1
 #define USE_D3D12_DEBUG 1
 #define CLEAR_NEW_MEMORY_WITH_ZEROES 1
+#define USE_ASSERTS 1
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
@@ -33,24 +34,31 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 #endif
 
 #define COM_RELEASE(ptr)if(ptr != nullptr) { (ptr)->Release(); ptr = nullptr; }
-#define ASSERT_DEBUG_MSG(x, msg)                \
-{                                               \
-    if(!(x))                                    \
-    {                                           \
-        switch(handleAssert(#x, msg))           \
-        {                                       \
-            case assert_result_debug:           \
-                DebugBreak();                   \
-                break;                          \
-            case assert_result_continue:        \
-                break;                          \
-            case assert_result_exit:            \
-                exit(-1);                       \
-            default:                            \
-                break;                          \
-        }                                       \
-    }                                           \
-}
+
+#if USE_ASSERTS
+    #define ASSERT_DEBUG_MSG(x, msg)                \
+    {                                               \
+        if(!(x))                                    \
+        {                                           \
+            switch(handleAssert(#x, msg))           \
+            {                                       \
+                case assert_result_debug:           \
+                    DebugBreak();                   \
+                    break;                          \
+                case assert_result_continue:        \
+                    break;                          \
+                case assert_result_exit:            \
+                    exit(-1);                       \
+                default:                            \
+                    break;                          \
+            }                                       \
+        }                                           \
+    }
+    #define ASSERT_DEBUG_EXECUTE_ALWAYS(x) ASSERT_DEBUG_MSG(x, nullptr)
+#else
+    #define ASSERT_DEBUG_MSG(x, msg)
+    #define ASSERT_DEBUG_EXECUTE_ALWAYS(x) x
+#endif
 
 #define ASSERT_DEBUG(x) ASSERT_DEBUG_MSG(x, nullptr)
 #define ASSERT_DEBUG_UNREACHABLE_CODE() ASSERT_DEBUG(false)
@@ -66,10 +74,10 @@ typedef ID3D12Debug6    D3D12DebugType;
 typedef IDXGIFactory7   DXGIFactoryType;
 typedef IDXGISwapChain4 DXGISwapChainType;
 
-enum alloc_flags_t
+enum alloc_flags_t : uint8_t
 {
-    none         = 0x0,
-    clear_memory = 0x1
+    alloc_flag_none         = 0x0,
+    alloc_flag_clear_memory = 0x1
 };
 
 struct memory_allocator_t
@@ -79,7 +87,7 @@ struct memory_allocator_t
 };
 
 constexpr uint64_t defaultAllocationAlignment   = 16u;
-constexpr uint32_t frameBufferCount             = 2u;
+constexpr uint32_t invalidResourceHandleValue   = ~0u;
 
 struct d3d12_resource_t
 {
@@ -126,22 +134,94 @@ struct render_pass_t
     render_pass_t*              pNext;
 };
 
+struct staging_buffer_t
+{
+    uint64_t capacityInBytes;
+    uint64_t remainingSizeInBytes;
+    d3d12_resource_t bufferResource;
+    staging_buffer_t* pNext;
+};
+
+enum upload_buffer_flags_t : uint8_t
+{
+    upload_buffer_flag_none                = 0x0,
+    upload_buffer_flag_create_shadow_copy  = 0x1
+};
+
+struct upload_buffer_t
+{
+    uint64_t            startStagingBufferByteIndex;
+    uint64_t            sizeInBytes;
+    void*               pData;
+    d3d12_resource_t*   pBufferResource;
+    upload_buffer_t*    pNext;
+};
+
+enum vertex_attribute_t : uint8_t
+{
+    vertex_attribute_position
+};
+
+enum vertex_attribute_type_t : uint8_t
+{
+    vertex_attribute_type_float
+};
+
+struct vertex_attribute_entry_t
+{
+    vertex_attribute_t      attribute;
+    vertex_attribute_type_t type;
+    uint32_t                count;
+};
+
+struct resource_handle_t
+{
+    uint32_t index;
+};
+
+struct vertex_buffer_handle_t : resource_handle_t
+{
+
+};
+
+struct upload_buffer_handle_t : resource_handle_t
+{
+
+};
+
+struct vertex_format_t
+{
+    vertex_attribute_entry_t    pVertexAttributes[12];
+    uint32_t                    vertexAttributeCount;
+};
+
+struct vertex_buffer_t
+{
+    d3d12_resource_t bufferResource;
+};
+
 struct graphics_frame_t
 {
-    render_context_t*                       pRenderContext;
     render_target_t*                        pBackBuffer;
     render_pass_t*                          pRenderPassBuffer;
     memory_allocator_t*                     pMemoryAllocator;
     render_pass_t*                          pFirstRenderPassToExecute;
     render_pass_t*                          pLastRenderPassToExecute;
+    staging_buffer_t*                       pFirstStagingBuffer;
+    upload_buffer_t**                       ppUploadBuffers;
+    vertex_buffer_t**                       ppVertexBuffers;
     uint64_t                                frameIndex;
+    uint32_t                                vertexBufferCount;
+    uint32_t                                uploadBufferCount;
     uint32_t                                renderPassIndex;
     uint32_t                                renderPassCount;
+    uint32_t                                maxVertexBufferCount;
+    uint32_t                                maxUploadBufferCount;
     uint32_t                                openRenderPassCount;
+    uint32_t                                defaultStagingBufferSizeInBytes;
+    D3D12DeviceType*                        pDevice;
     ID3D12Fence*                            pFrameFence;
-    ID3D12GraphicsCommandList*              pFrameGeneralCopyQueue;
     ID3D12GraphicsCommandList*              pFrameGeneralGraphicsQueue;
-    ID3D12CommandAllocator*                 pFrameGeneralCopyCommandAllocator;
     ID3D12CommandAllocator*                 pFrameGeneralGraphicsCommandAllocator;
     ID3D12CommandQueue*                     pFrameCommandQueue;
     HANDLE                                  pFrameFinishedEvent;
@@ -157,9 +237,8 @@ struct graphics_frame_collection_t
 struct graphics_frame_parameters_t
 {
     uint32_t maxRenderPassCount;
-    uint32_t maxDirectAllocatorCount;
-    uint32_t maxCopyAllocatorCount;
-    uint32_t maxComputeAllocatorCount;
+    uint32_t maxVertexBufferCount;
+    uint32_t maxUploadBufferCount;
 };
 
 struct render_context_t
@@ -173,7 +252,8 @@ struct render_context_t
     const graphics_frame_t*     pCurrentGraphicsFrame;
 
     d3d12_swap_chain_t          swapChain;
-    ID3D12CommandQueue*         pDefaultCommandQueue;
+    ID3D12CommandQueue*         pDefaultDirectCommandQueue;
+    ID3D12CommandQueue*         pDefaultCopyCommandQueue;
 
     uint64_t                    frameIndex;
 };
@@ -306,14 +386,14 @@ HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCal
     return originalResult;
 }
 
-void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, alloc_flags_t flags = alloc_flags_t::none)
+void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, alloc_flags_t flags = alloc_flag_none)
 {
     void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, defaultAllocationAlignment);
     
 #if FORCE_CLEAR_ALLOCATIONS
     const bool clearMemory = true;
 #else
-    const bool clearMemory = (flags & alloc_flags_t::clear_memory);
+    const bool clearMemory = (flags & alloc_flag_clear_memory);
 #endif
 
     if(pMemory && clearMemory)
@@ -324,14 +404,14 @@ void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes
     return pMemory;
 }
 
-void* allocateAlignedFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, uint64_t alignmentInBytes, alloc_flags_t flags = alloc_flags_t::none)
+void* allocateAlignedFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, uint64_t alignmentInBytes, alloc_flags_t flags = alloc_flag_none)
 {
     void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, alignmentInBytes);
     
 #if FORCE_CLEAR_ALLOCATIONS
     const bool clearMemory = true;
 #else
-    const bool clearMemory = (flags & alloc_flags_t::clear_memory);
+    const bool clearMemory = (flags & alloc_flag_clear_memory);
 #endif
 
     if(pMemory && clearMemory)
@@ -421,8 +501,14 @@ D3D12_CPU_DESCRIPTOR_HANDLE getNextCPUDescriptorHandle(d3d12_descriptor_heap_t* 
 
 void flushFrame(graphics_frame_t* pGraphicsFrame)
 {
-    WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
-    SetEvent(pGraphicsFrame->pFrameFinishedEvent);
+    const DWORD waitResult = WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
+    ASSERT_DEBUG(waitResult == WAIT_OBJECT_0);
+}
+
+void resetFrame(graphics_frame_t* pGraphicsFrame)
+{
+    COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator->Reset());
+    COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsQueue->Reset(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator, nullptr));
 }
 
 graphics_frame_t* getGraphicsFrameFromGraphicsFrameCollection(graphics_frame_collection_t* pGraphicsFrameCollection, const uint64_t frameIndex)
@@ -643,18 +729,16 @@ bool createD3D12Factory(DXGIFactoryType** pOutFactory)
     return true;
 }
 
-bool createDirectCommandQueue(D3D12DeviceType* pDevice, ID3D12CommandQueue** pOutCommandQueue)
+bool createCommandQueue(D3D12DeviceType* pDevice, ID3D12CommandQueue** pOutCommandQueue, D3D12_COMMAND_LIST_TYPE commandListType)
 {
-    D3D12_COMMAND_QUEUE_DESC defaultCommandQueueDesc = {};
-    defaultCommandQueueDesc.Type        = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    defaultCommandQueueDesc.Priority    = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    defaultCommandQueueDesc.Flags       = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    if(COM_CALL(pDevice->CreateCommandQueue(&defaultCommandQueueDesc, IID_PPV_ARGS(pOutCommandQueue))) != S_OK)
+    D3D12_COMMAND_QUEUE_DESC commandQueueDesc = {};
+    commandQueueDesc.Type        = commandListType;
+    commandQueueDesc.Priority    = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+    commandQueueDesc.Flags       = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    if(COM_CALL(pDevice->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(pOutCommandQueue))) != S_OK)
     {
         return false;
     }
-
-    (*pOutCommandQueue)->SetName(L"D3D12 Default Command Queue");
 
     return true;
 }
@@ -816,11 +900,11 @@ void destroyGraphicsFrame(graphics_frame_t* pGraphicsFrame)
     }
 
     freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->pRenderPassBuffer);
+    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->ppVertexBuffers);
+    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->ppUploadBuffers);
 
-    COM_RELEASE(pGraphicsFrame->pFrameGeneralCopyCommandAllocator);
     COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator);
     COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsQueue);
-    COM_RELEASE(pGraphicsFrame->pFrameGeneralCopyQueue);
     COM_RELEASE(pGraphicsFrame->pFrameCommandQueue);
     COM_RELEASE(pGraphicsFrame->pFrameFence);   
 }
@@ -836,15 +920,32 @@ void destroyGraphicsFrameCollection(graphics_frame_collection_t* pGraphicsFrameC
     freeFromAllocator(pGraphicsFrameCollection->pMemoryAllocator, pGraphicsFrameCollection->pGraphicsFrames);
 }
 
+bool isValidGraphicsFrameParameters(const graphics_frame_parameters_t* pGraphicsFrameParameters)
+{
+    if(pGraphicsFrameParameters->maxRenderPassCount == 0u)
+    {
+        return false;
+    }
+
+    if(pGraphicsFrameParameters->maxUploadBufferCount == 0u)
+    {
+        return false;
+    }
+
+    if(pGraphicsFrameParameters->maxVertexBufferCount == 0u)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice)
 {
     ASSERT_DEBUG(pGraphicsFrameParameters != nullptr);
     ASSERT_DEBUG(pMemoryAllocator != nullptr);
     ASSERT_DEBUG(pDevice != nullptr);
-    ASSERT_DEBUG(pGraphicsFrameParameters->maxRenderPassCount > 0u);
-    ASSERT_DEBUG(pGraphicsFrameParameters->maxComputeAllocatorCount > 0u);
-    ASSERT_DEBUG(pGraphicsFrameParameters->maxCopyAllocatorCount > 0u);
-    ASSERT_DEBUG(pGraphicsFrameParameters->maxDirectAllocatorCount > 0u);
+    ASSERT_DEBUG(isValidGraphicsFrameParameters(pGraphicsFrameParameters));
 
     graphics_frame_t graphicsFrame = {0};
     graphicsFrame.pMemoryAllocator = pMemoryAllocator;
@@ -854,8 +955,20 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         return false;
     }
 
-    render_pass_t* pRenderPasses = (render_pass_t*)allocateFromAllocator(pMemoryAllocator, (sizeof(render_pass_t) * pGraphicsFrameParameters->maxRenderPassCount), alloc_flags_t::clear_memory);
+    render_pass_t* pRenderPasses = (render_pass_t*)allocateFromAllocator(pMemoryAllocator, (sizeof(render_pass_t) * pGraphicsFrameParameters->maxRenderPassCount), alloc_flag_clear_memory);
     if(pRenderPasses == nullptr)
+    {
+        goto cleanup_and_exit_failure;
+    }
+
+    vertex_buffer_t** ppVertexBuffers = (vertex_buffer_t**)allocateFromAllocator(pMemoryAllocator, sizeof(void*) * pGraphicsFrameParameters->maxVertexBufferCount, alloc_flag_clear_memory);
+    if(ppVertexBuffers == nullptr)
+    {
+        goto cleanup_and_exit_failure;
+    }
+
+    upload_buffer_t** ppUploadBuffers = (upload_buffer_t**)allocateFromAllocator(pMemoryAllocator, sizeof(void*) * pGraphicsFrameParameters->maxUploadBufferCount, alloc_flag_clear_memory);
+    if(ppUploadBuffers == nullptr)
     {
         goto cleanup_and_exit_failure;
     }
@@ -865,17 +978,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         goto cleanup_and_exit_failure;
     }
 
-    if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_COPY, &graphicsFrame.pFrameGeneralCopyCommandAllocator))
-    {
-        goto cleanup_and_exit_failure;
-    }
-
     if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, graphicsFrame.pFrameGeneralGraphicsCommandAllocator, &graphicsFrame.pFrameGeneralGraphicsQueue))
-    {
-        goto cleanup_and_exit_failure;
-    }
-
-    if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_COPY, graphicsFrame.pFrameGeneralCopyCommandAllocator, &graphicsFrame.pFrameGeneralCopyQueue))
     {
         goto cleanup_and_exit_failure;
     }
@@ -893,8 +996,13 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         }
     }
 
-    graphicsFrame.pRenderPassBuffer = pRenderPasses;
-    graphicsFrame.renderPassCount   = pGraphicsFrameParameters->maxRenderPassCount;
+    graphicsFrame.pDevice               = pDevice;
+    graphicsFrame.pRenderPassBuffer     = pRenderPasses;
+    graphicsFrame.ppUploadBuffers       = ppUploadBuffers;
+    graphicsFrame.ppVertexBuffers       = ppVertexBuffers;
+    graphicsFrame.renderPassCount       = pGraphicsFrameParameters->maxRenderPassCount;
+    graphicsFrame.maxUploadBufferCount  = pGraphicsFrameParameters->maxUploadBufferCount;
+    graphicsFrame.maxVertexBufferCount  = pGraphicsFrameParameters->maxVertexBufferCount;
 
     if(!createFence(pDevice, &graphicsFrame.pFrameFence, 0))
     {
@@ -909,7 +1017,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         return false;
 }
 
-bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrameCollection, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice, const uint8_t frameCount)
+bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrameCollection, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice, const uint8_t frameCount)
 {
     graphics_frame_collection_t graphicFrameCollection = {};
     graphicFrameCollection.pMemoryAllocator = pMemoryAllocator;
@@ -920,14 +1028,9 @@ bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrame
         goto cleanup_and_exit_failure;
     }
 
-    for(uint32_t frameIndex = 0u; frameIndex < frameBufferCount; ++frameIndex)
+    for(uint32_t frameIndex = 0u; frameIndex < frameCount; ++frameIndex)
     {
-        graphics_frame_parameters_t graphicsFrameParameters = {};
-        graphicsFrameParameters.maxRenderPassCount          = 64u;
-        graphicsFrameParameters.maxComputeAllocatorCount    = 32u;
-        graphicsFrameParameters.maxDirectAllocatorCount     = 128u;
-        graphicsFrameParameters.maxCopyAllocatorCount       = 8u;
-        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], &graphicsFrameParameters, pMemoryAllocator, pDevice))
+        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], pGraphicsFrameParameters, pMemoryAllocator, pDevice))
         {
             goto cleanup_and_exit_failure;
         }
@@ -943,10 +1046,80 @@ bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrame
         return false;
 }
 
-bool initializeRenderContext(render_context_t* pRenderContext, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, const uint32_t frameBufferCount, bool useDebugLayer)
+graphics_frame_t* getCurrentFrame(render_context_t* pRenderContext)
 {
-    createDefaultMemoryAllocator(&pRenderContext->defaultAllocator);
+    const uint64_t frameIndex = pRenderContext->frameIndex % pRenderContext->graphicsFramesCollection.frameCount;
+    return getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
+}
 
+struct render_context_parameters_t
+{
+    memory_allocator_t* pAllocator;
+    HWND                pWindowHandle;
+    uint32_t            windowWidth;
+    uint32_t            windowHeight;
+    uint32_t            frameBufferCount;
+
+    struct
+    {
+        uint32_t        maxVertexBufferCount;
+        uint32_t        maxUploadBufferCount;
+        uint32_t        maxRenderPassCount;
+    } limits;
+
+    bool                useDebugLayer;
+};
+
+bool isValidRenderContextParameters(const render_context_parameters_t* pParameters)
+{
+    if(pParameters->frameBufferCount < 2u)
+    {
+        return false;
+    }
+
+    if(pParameters->pWindowHandle == nullptr || pParameters->pWindowHandle == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    if(pParameters->windowHeight <= 0)
+    {
+        return false;
+    }
+
+    if(pParameters->windowWidth <= 0)
+    {
+        return false;
+    }
+
+    if(pParameters->limits.maxUploadBufferCount == 0)
+    {
+        return false;
+    }
+
+    if(pParameters->limits.maxVertexBufferCount == 0)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool initializeRenderContext(render_context_t* pRenderContext, const render_context_parameters_t* pParameters)
+{
+    ASSERT_DEBUG(isValidRenderContextParameters(pParameters));
+
+    memory_allocator_t* pAllocator = pParameters->pAllocator;
+    if(pAllocator != nullptr)
+    {
+        pRenderContext->defaultAllocator = *pAllocator;
+    }
+    else
+    {
+        createDefaultMemoryAllocator(&pRenderContext->defaultAllocator);
+    }
+
+    bool useDebugLayer = pParameters->useDebugLayer;
     if(useDebugLayer)
     {
         useDebugLayer = enableD3D12DebugLayer(&pRenderContext->pDebugLayer);
@@ -962,17 +1135,26 @@ bool initializeRenderContext(render_context_t* pRenderContext, HWND pWindowHandl
         return false;
     }
 
-    if(!createDirectCommandQueue(pRenderContext->pDevice, &pRenderContext->pDefaultCommandQueue))
+    if(!createCommandQueue(pRenderContext->pDevice, &pRenderContext->pDefaultDirectCommandQueue, D3D12_COMMAND_LIST_TYPE_DIRECT))
     {
         return false;
     }
 
-    if(!createSwapChain(&pRenderContext->swapChain, &pRenderContext->defaultAllocator, pRenderContext->pFactory, pRenderContext->pDevice, pRenderContext->pDefaultCommandQueue, pWindowHandle, windowWidth, windowHeight, frameBufferCount))
+    if(!createCommandQueue(pRenderContext->pDevice, &pRenderContext->pDefaultCopyCommandQueue, D3D12_COMMAND_LIST_TYPE_COPY))
     {
         return false;
     }
 
-    if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &pRenderContext->defaultAllocator, pRenderContext->pDevice, frameBufferCount))
+    if(!createSwapChain(&pRenderContext->swapChain, &pRenderContext->defaultAllocator, pRenderContext->pFactory, pRenderContext->pDevice, pRenderContext->pDefaultDirectCommandQueue, pParameters->pWindowHandle, pParameters->windowWidth, pParameters->windowHeight, pParameters->frameBufferCount))
+    {
+        return false;
+    }
+
+    graphics_frame_parameters_t graphicsFrameParameters = {};
+    graphicsFrameParameters.maxRenderPassCount      = pParameters->limits.maxRenderPassCount;
+    graphicsFrameParameters.maxUploadBufferCount    = pParameters->limits.maxUploadBufferCount;
+    graphicsFrameParameters.maxVertexBufferCount    = pParameters->limits.maxVertexBufferCount;
+    if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &graphicsFrameParameters, &pRenderContext->defaultAllocator, pRenderContext->pDevice, pParameters->frameBufferCount))
     {
         return false;
     }
@@ -985,16 +1167,8 @@ bool initializeRenderContext(render_context_t* pRenderContext, HWND pWindowHandl
         }
     }
 
-    return true;
-}
+    pRenderContext->frameIndex = 1u;
 
-bool setup(render_context_t* pRenderContext, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, bool useDebugLayer)
-{
-    if(!initializeRenderContext(pRenderContext, pWindowHandle, windowWidth, windowHeight, frameBufferCount, useDebugLayer))
-    {
-        return false;
-    }
-    SetWindowLongPtrA(pWindowHandle, GWLP_USERDATA, (LONG_PTR)pRenderContext);
     return true;
 }
 
@@ -1002,17 +1176,20 @@ graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
 {
     ASSERT_DEBUG(pRenderContext != nullptr);
     ASSERT_DEBUG(pRenderContext->pCurrentGraphicsFrame == nullptr);
+
+    const uint64_t previousFrameIndex = (pRenderContext->frameIndex - 1) % pRenderContext->graphicsFramesCollection.frameCount;
     const uint64_t frameIndex = pRenderContext->frameIndex % pRenderContext->graphicsFramesCollection.frameCount;
 
+    graphics_frame_t* pPreviousFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, previousFrameIndex);
     graphics_frame_t* pGraphicsFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
+    
+    memcpy(pGraphicsFrame->ppUploadBuffers, pPreviousFrame->ppUploadBuffers, pPreviousFrame->uploadBufferCount * sizeof(void*));
+    memcpy(pGraphicsFrame->ppVertexBuffers, pPreviousFrame->ppVertexBuffers, pPreviousFrame->vertexBufferCount * sizeof(void*));
+    pGraphicsFrame->uploadBufferCount = pPreviousFrame->uploadBufferCount;
+    pGraphicsFrame->vertexBufferCount = pPreviousFrame->vertexBufferCount;
 
-    const DWORD waitResult = WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
-    ASSERT_DEBUG(waitResult == WAIT_OBJECT_0);
-
-    COM_CALL(pGraphicsFrame->pFrameGeneralCopyCommandAllocator->Reset());
-    COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator->Reset());
-    COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsQueue->Reset(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator, nullptr));
-    COM_CALL(pGraphicsFrame->pFrameGeneralCopyQueue->Reset(pGraphicsFrame->pFrameGeneralCopyCommandAllocator, nullptr));
+    flushFrame(pGraphicsFrame);
+    resetFrame(pGraphicsFrame);
 
     const uint32_t currentBackBufferIndex = pRenderContext->swapChain.pSwapChain->GetCurrentBackBufferIndex();
 
@@ -1034,22 +1211,22 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
     transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pRenderContext->swapChain.pBackBuffers[frameBufferIndex].resource, D3D12_RESOURCE_STATE_PRESENT);
 
     pGraphicsFrame->pFrameGeneralGraphicsQueue->Close();
-    pGraphicsFrame->pFrameGeneralCopyQueue->Close();
-    pRenderContext->pDefaultCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pGraphicsFrame->pFrameGeneralGraphicsQueue);
+    pRenderContext->pDefaultDirectCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pGraphicsFrame->pFrameGeneralGraphicsQueue);
 
     render_pass_t* pRenderPass = pGraphicsFrame->pFirstRenderPassToExecute;
     while(pRenderPass)
     {
-        pRenderContext->pDefaultCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pRenderPass->pGraphicsCommandList);
+        pRenderContext->pDefaultDirectCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pRenderPass->pGraphicsCommandList);
         pRenderPass = pRenderPass->pNext;
     }
+
+    COM_CALL(pRenderContext->pDefaultDirectCommandQueue->Signal(pGraphicsFrame->pFrameFence, pGraphicsFrame->frameIndex));
     
     pGraphicsFrame->pFirstRenderPassToExecute = nullptr;
     pGraphicsFrame->pLastRenderPassToExecute = nullptr;
     pGraphicsFrame->renderPassIndex = 0;
 
     COM_CALL(pRenderContext->swapChain.pSwapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
-    COM_CALL(pRenderContext->pDefaultCommandQueue->Signal(pGraphicsFrame->pFrameFence, pGraphicsFrame->frameIndex));
     COM_CALL(pGraphicsFrame->pFrameFence->SetEventOnCompletion(pGraphicsFrame->frameIndex, pGraphicsFrame->pFrameFinishedEvent));
 
     pRenderContext->pCurrentGraphicsFrame = nullptr;
@@ -1136,66 +1313,218 @@ void executeRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderP
     }
 }
 
-struct upload_buffer_t
+template<typename T>
+T createInvalidResourceHandle()
 {
-    const void* pData;
-    uint32_t sizeInBytes;
-
-    d3d12_resource_t uploadHeapResource;
-};
-
-void createVertexBuffer(graphics_frame_t* pGraphicsFrame, upload_buffer_t* pUploadBuffer)
-{
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Alignment  = 0u;
-    desc.Width      = pUploadBuffer->sizeInBytes;
-    
-    D3D12_HEAP_PROPERTIES heapProperties = {};
-    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
-    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
-    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    
-    ID3D12Resource* pResource = nullptr;
-    pGraphicsFrame->pRenderContext->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, nullptr, nullptr, IID_PPV_ARGS(&pResource));
+    T handle = {invalidResourceHandleValue};
+    return handle;
 }
 
-upload_buffer_t* getNextFreeUploadBuffer(graphics_frame_t* pGraphicsFrame)
+template<typename T>
+T createResourceHandle(uint32_t resourceIndex)
 {
-    return nullptr;
+    T handle = {resourceIndex};
+    return handle;
 }
 
-upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, const void* pData, const size_t dataSizeInBytes)
+template<typename T>
+bool isInvalidResourceHandle(const T& resourceHandle)
 {
+    return resourceHandle.index == invalidResourceHandleValue;
+}
+
+vertex_buffer_handle_t createVertexBuffer(graphics_frame_t* pGraphicsFrame, const upload_buffer_handle_t& uploadBufferHandle)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(!isInvalidResourceHandle(uploadBufferHandle));
+
+    const uint32_t newVertexBufferIndex = pGraphicsFrame->vertexBufferCount;
+    if((newVertexBufferIndex + 1) > pGraphicsFrame->maxVertexBufferCount)
+    {
+        return createInvalidResourceHandle<vertex_buffer_handle_t>();
+    }
+
+    vertex_buffer_t* pVertexBuffer = (vertex_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(vertex_buffer_t));
+    if(pVertexBuffer == nullptr)
+    {
+        return createInvalidResourceHandle<vertex_buffer_handle_t>();
+    }
+
+    upload_buffer_t* pUploadBuffer = pGraphicsFrame->ppUploadBuffers[uploadBufferHandle.index];
+    const uint64_t bufferSizeInBytes = pUploadBuffer->sizeInBytes - pUploadBuffer->startStagingBufferByteIndex;
+
     D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Alignment  = 0u;
-    desc.Width      = dataSizeInBytes;
+    desc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment          = 0u;
+    desc.DepthOrArraySize   = 1u;
+    desc.Height             = 1u;
+    desc.MipLevels          = 1u;
+    desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.SampleDesc.Count   = 1u;
+    desc.SampleDesc.Quality = 0u;
+    desc.Width              = bufferSizeInBytes;
     
     D3D12_HEAP_PROPERTIES heapProperties = {};
-    heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+    heapProperties.Type                 = D3D12_HEAP_TYPE_DEFAULT;
+    heapProperties.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
     heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
     
+    if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, IID_PPV_ARGS(&pVertexBuffer->bufferResource.pResource))) != S_OK)
+    {
+        freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pVertexBuffer);
+        return createInvalidResourceHandle<vertex_buffer_handle_t>();
+    }
+
+    pVertexBuffer->bufferResource.currentState = D3D12_RESOURCE_STATE_COMMON;
+
+    #if 1
+    transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
+    pGraphicsFrame->pFrameGeneralGraphicsQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->pBufferResource->pResource, pUploadBuffer->startStagingBufferByteIndex, bufferSizeInBytes);
+    transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    #else
+    transitionResource(pGraphicsFrame->pFrameGeneralCopyQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
+    pGraphicsFrame->pFrameGeneralCopyQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->pBufferResource->pResource, pUploadBuffer->startStagingBufferByteIndex, bufferSizeInBytes);
+    #endif
+
+    pGraphicsFrame->vertexBufferCount++;
+    pGraphicsFrame->ppVertexBuffers[newVertexBufferIndex] = pVertexBuffer;
+    return createResourceHandle<vertex_buffer_handle_t>(newVertexBufferIndex);
+}
+
+bool createStagingBuffer(graphics_frame_t* pGraphicsFrame, const size_t minSizeInBytes, staging_buffer_t** pOutStagingBuffer)
+{
+    const uint64_t stagingBufferSizeInBytes = pGraphicsFrame->defaultStagingBufferSizeInBytes < minSizeInBytes ? minSizeInBytes : pGraphicsFrame->defaultStagingBufferSizeInBytes;
+
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment          = 0u;
+    desc.Height             = 1u;
+    desc.DepthOrArraySize   = 1u;
+    desc.MipLevels          = 1u;
+    desc.SampleDesc.Count   = 1u;
+    desc.SampleDesc.Quality = 0u;
+    desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Width              = stagingBufferSizeInBytes;
+    
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type                 = D3D12_HEAP_TYPE_UPLOAD;
+    heapProperties.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    
+    staging_buffer_t* pStagingBuffer = (staging_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(staging_buffer_t));
+    if(pStagingBuffer == nullptr)
+    {
+        return false;
+    }
+
     ID3D12Resource* pResource = nullptr;
-    pGraphicsFrame->pRenderContext->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, nullptr, IID_PPV_ARGS(&pResource));
+    if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, nullptr, IID_PPV_ARGS(&pResource))) != S_OK)
+    {
+        freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pStagingBuffer);
+        return false;
+    }
 
-    D3D12_RANGE readWriteRange = {};
-    readWriteRange.Begin = 0u;
-    readWriteRange.End = dataSizeInBytes;
+    pStagingBuffer->capacityInBytes             = stagingBufferSizeInBytes;
+    pStagingBuffer->remainingSizeInBytes        = stagingBufferSizeInBytes;
+    pStagingBuffer->pNext                       = nullptr;
+    pStagingBuffer->bufferResource.currentState = D3D12_RESOURCE_STATE_GENERIC_READ;
+    pStagingBuffer->bufferResource.pResource    = pResource;
 
-    void* pMappedData = nullptr;
-    COM_CALL(pResource->Map(0u, &readWriteRange, &pMappedData));
-    memcpy(pMappedData, pData, dataSizeInBytes);
-    pResource->Unmap(0u, &readWriteRange);
+    *pOutStagingBuffer = pStagingBuffer;
+    return true;
+}
 
-    upload_buffer_t* pUploadBuffer = getNextFreeUploadBuffer(pGraphicsFrame);
-    pUploadBuffer->pData = pData;
-    pUploadBuffer->sizeInBytes = (uint32_t)dataSizeInBytes;
-    pUploadBuffer->uploadHeapResource.currentState = D3D12_RESOURCE_STATE_GENERIC_READ;
-    pUploadBuffer->uploadHeapResource.pResource = pResource;
+staging_buffer_t* getOrCreateStagingBufferToFitSize(graphics_frame_t* pGraphicsFrame, const uint64_t dataSizeInBytes)
+{
+    if(pGraphicsFrame->pFirstStagingBuffer != nullptr)
+    {
+        if(pGraphicsFrame->pFirstStagingBuffer->remainingSizeInBytes >= dataSizeInBytes)
+        {
+            return pGraphicsFrame->pFirstStagingBuffer;
+        }
+    }
 
-    return pUploadBuffer;
+    staging_buffer_t* pNextStagingBuffer = pGraphicsFrame->pFirstStagingBuffer;
+    staging_buffer_t* pNewStagingBuffer = nullptr;
+    if(!createStagingBuffer(pGraphicsFrame, dataSizeInBytes, &pNewStagingBuffer))
+    {
+        return nullptr;
+    }
+
+    if(pGraphicsFrame->pFirstStagingBuffer != nullptr)
+    {
+        pGraphicsFrame->pFirstStagingBuffer->pNext = pNextStagingBuffer;
+    }
+    pGraphicsFrame->pFirstStagingBuffer = pNewStagingBuffer;
+    return pNewStagingBuffer;
+}
+
+vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pVertexAttributes != nullptr);
+    ASSERT_DEBUG(vertexAttributeCount > 0u);
+    
+    vertex_format_t* pVertexFormat = (vertex_format_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(vertex_format_t));
+    if(pVertexFormat == nullptr)
+    {
+        return nullptr;
+    }
+
+    memcpy(pVertexFormat->pVertexAttributes, pVertexAttributes, sizeof(vertex_attribute_entry_t) * vertexAttributeCount);
+    pVertexFormat->vertexAttributeCount = vertexAttributeCount;
+
+    return pVertexFormat;
+}
+
+upload_buffer_handle_t createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pData, const uint64_t dataSizeInBytes, upload_buffer_flags_t flags = upload_buffer_flag_none)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pData != nullptr);
+    ASSERT_DEBUG(dataSizeInBytes > 0u);
+
+    const uint32_t newUploadBufferIndex = pGraphicsFrame->uploadBufferCount;
+    if((newUploadBufferIndex+1) >= pGraphicsFrame->maxUploadBufferCount)
+    {
+        return createInvalidResourceHandle<upload_buffer_handle_t>();
+    }
+
+    staging_buffer_t* pStagingBuffer = getOrCreateStagingBufferToFitSize(pGraphicsFrame, dataSizeInBytes);
+    if(pStagingBuffer == nullptr)
+    {
+        return createInvalidResourceHandle<upload_buffer_handle_t>();
+    }
+
+    upload_buffer_t* pNewUploadBuffer = (upload_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(upload_buffer_t));
+    if(pNewUploadBuffer == nullptr)
+    {
+        return createInvalidResourceHandle<upload_buffer_handle_t>();
+    }
+
+    if((flags & upload_buffer_flag_create_shadow_copy) > 0u)
+    {
+        void* pShadowData = allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(dataSizeInBytes));
+        if(pShadowData == nullptr)
+        {
+            freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pNewUploadBuffer);
+            return createInvalidResourceHandle<upload_buffer_handle_t>();
+        }
+
+        memcpy(pShadowData, pData, dataSizeInBytes);
+        pData = pShadowData;
+    }
+
+    const uint64_t newRemainingStagingBufferSizeInBytes = pStagingBuffer->remainingSizeInBytes - dataSizeInBytes;
+    pNewUploadBuffer->startStagingBufferByteIndex   = pStagingBuffer->capacityInBytes - pStagingBuffer->remainingSizeInBytes;
+    pNewUploadBuffer->sizeInBytes                   = dataSizeInBytes;
+    pNewUploadBuffer->pData                         = pData;
+    pNewUploadBuffer->pBufferResource               = &pStagingBuffer->bufferResource;
+
+    pGraphicsFrame->ppUploadBuffers[newUploadBufferIndex] = pNewUploadBuffer;
+    pGraphicsFrame->uploadBufferCount++;
+
+    pStagingBuffer->remainingSizeInBytes -= dataSizeInBytes;
+    return createResourceHandle<upload_buffer_handle_t>(newUploadBufferIndex);
 }
 
 void renderFrame(HWND hwnd, graphics_frame_t* pGraphicsFrame)
@@ -1212,27 +1541,53 @@ void renderFrame(HWND hwnd, graphics_frame_t* pGraphicsFrame)
 
     render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Clear Background");
     clearColorRenderTarget(pRenderPass, pGraphicsFrame->pBackBuffer, r, g, 0.2f, 1.0f);
-    endRenderPass(pGraphicsFrame, pRenderPass);
+    endRenderPass(pGraphicsFrame, pRenderPass);   
 
+    executeRenderPass(pGraphicsFrame, pRenderPass);
+}
+
+bool createSingleTriangleMesh(graphics_frame_t* pGraphicsFrame)
+{
     const float triangleVertices[] = {
         0.0f, 0.0f, 0.0f,
         0.5f, 1.0f, 0.0f,
         1.0f, 0.0f, 0.0f
     };
 
-    //render_pass_t* pDrawRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle");
-    
-    #if 0
-    upload_buffer_t* pVertexBufferData = createUploadBuffer(pGraphicsFrame, triangleVertices, sizeof(triangleVertices));
-    createVertexBuffer(pGraphicsFrame, pVertexBufferData)
-    #endif
 
-    executeRenderPass(pGraphicsFrame, pRenderPass);
+    //render_pass_t* pDrawRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle");
+    vertex_attribute_entry_t pVertexAttributes[] = {
+        {vertex_attribute_position, vertex_attribute_type_float, 3u}
+    };
+
+    vertex_format_t* pVertexFormat = createVertexFormat(pGraphicsFrame, pVertexAttributes, 1u);
+
+
+    upload_buffer_handle_t vertexBufferDataHandle = createUploadBuffer(pGraphicsFrame, (void*)triangleVertices, sizeof(triangleVertices));
+    ASSERT_DEBUG(!isInvalidResourceHandle(vertexBufferDataHandle));
+
+    vertex_buffer_handle_t triangleBufferHandle = createVertexBuffer(pGraphicsFrame, vertexBufferDataHandle);
+    ASSERT_DEBUG(!isInvalidResourceHandle(triangleBufferHandle));
+
+    return true;
 }
+
+bool createMesh(graphics_frame_t* pGraphicsFrame)
+{
+    return createSingleTriangleMesh(pGraphicsFrame);
+}   
+
 
 void doFrame(HWND hwnd, render_context_t* pRenderContext)
 {
+    static bool meshCreated = false;
     graphics_frame_t* pFrame = beginNextFrame(pRenderContext);
+    
+    if(!meshCreated && createMesh(pFrame))
+    {
+        meshCreated = true;
+    }
+
     renderFrame(hwnd, pFrame);
     finishFrame(pRenderContext, pFrame);
 }
@@ -1251,12 +1606,33 @@ void shutdownRenderContext(render_context_t* pRenderContext)
 {
     destroyGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection);
     destroySwapChain(&pRenderContext->swapChain);
-    COM_RELEASE(pRenderContext->pDefaultCommandQueue);
+    COM_RELEASE(pRenderContext->pDefaultDirectCommandQueue);
+    COM_RELEASE(pRenderContext->pDefaultCopyCommandQueue);
     COM_RELEASE(pRenderContext->pFactory);
     COM_RELEASE(pRenderContext->pDebugLayer);
     COM_RELEASE(pRenderContext->pDevice);
 
     clearMemoryWithZeroes(pRenderContext);
+}
+
+bool setup(render_context_t* pRenderContext, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, bool useDebugLayer)
+{
+    render_context_parameters_t parameters = {};
+    parameters.frameBufferCount = 3u;
+    parameters.useDebugLayer = useDebugLayer;
+    parameters.windowHeight = windowHeight;
+    parameters.windowWidth = windowWidth;
+    parameters.pWindowHandle = pWindowHandle;
+    parameters.limits.maxUploadBufferCount = 32u;
+    parameters.limits.maxVertexBufferCount = 32u;
+    parameters.limits.maxRenderPassCount   = 32u;
+    if(!initializeRenderContext(pRenderContext, &parameters))
+    {
+        return false;
+    }
+
+    SetWindowLongPtrA(pWindowHandle, GWLP_USERDATA, (LONG_PTR)pRenderContext);
+    return true;
 }
 
 int CALLBACK WinMain(HINSTANCE hInstance,
