@@ -7,6 +7,10 @@
             "label": "Build Debug",
             "type": "shell",
             "windows": {
+                "options":
+                {
+                    "cwd": "${workspaceFolder}/win32"
+                },
                 "command": "build.bat",
                 "args": [
                     "debug"
@@ -24,6 +28,10 @@
             "label": "Build Release",
             "type": "shell",
             "windows": {
+                "options":
+                {
+                    "cwd": "${workspaceFolder}/win32"
+                },
                 "command": "build.bat",
                 "args": [
                     "release"

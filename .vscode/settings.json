@@ -46,7 +46,9 @@
         "unordered_set": "cpp",
         "source_location": "cpp",
         "__config": "cpp",
-        "__nullptr": "cpp"
+        "__nullptr": "cpp",
+        "cstddef": "cpp",
+        "cstdint": "cpp"
     },
     "C_Cpp.default.defines": [ "K15_SOFTWARE_RASTERIZER_IMPLEMENTATION" ],
     "C_Cpp.default.cppStandard": "c++17",
