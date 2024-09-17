@@ -8,20 +8,20 @@
             "name": "Launch debug",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/debug/k15_d3d12_renderer.exe",
+            "program": "${workspaceFolder}/win32/build/debug/render_triangle.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
+            "cwd": "${workspaceFolder}/win32/build/debug",
             "environment": []
         },
         {
             "name": "Launch release",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/release/k15_d3d12_renderer.exe",
+            "program": "${workspaceFolder}/win32/build/release/render_triangle.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
+            "cwd": "${workspaceFolder}/win32/build/debug",
             "environment": []
         }
     ]

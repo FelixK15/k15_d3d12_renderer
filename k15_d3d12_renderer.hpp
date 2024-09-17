@@ -5,12 +5,12 @@
 #include <windows.h>
 #include <stdio.h>
 
-#define D3DCOMPILE_DEBUG 1
 #define USE_D3D12_DEBUG 1
 #define CLEAR_NEW_MEMORY_WITH_ZEROES 1
 #define USE_DEBUG_ASSERTS 1
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
+//#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <dxcapi.h>
 
@@ -27,6 +27,7 @@
 #pragma comment(lib, "DXGI.lib")
 #pragma comment(lib, "dxguid.lib")
 #pragma comment(lib, "x64/dxcompiler.lib")
+//#pragma comment(lib, "x64/D3dcompiler_47.lib")
 #pragma comment(lib, "x64/WinPixEventRuntime.lib")
 
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
@@ -72,7 +73,8 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 #define ASSERT_DEBUG(x)                 ASSERT_DEBUG_MSG(x, nullptr)
 #define ASSERT_DEBUG_UNREACHABLE_CODE() ASSERT_DEBUG(false)
 
-#define UNUSED_PARAMETER(var) (void)(var)
+#define UNREACHABLE_CODE()      __assume(0)
+#define UNUSED_PARAMETER(var)   (void)(var)
 
 struct memory_allocator_t;
 struct render_context_t;
@@ -84,6 +86,13 @@ typedef ID3D12Device10  D3D12DeviceType;
 typedef ID3D12Debug6    D3D12DebugType;
 typedef IDXGIFactory7   DXGIFactoryType;
 typedef IDXGISwapChain4 DXGISwapChainType;
+
+enum pipeline_stream_field_flags_t : uint16_t
+{
+    vs = 0x01,
+    ps = 0x02,
+    cs = 0x04
+};
 
 enum alloc_flags_t : uint8_t
 {
@@ -99,6 +108,73 @@ enum result_status_t : uint32_t
     invalid_arguments,
     internal_error,
     compilation_error
+};
+
+
+template<typename T, typename BASE_TYPE>
+struct flags_t
+{
+    flags_t<T, BASE_TYPE>& operator=(const BASE_TYPE flagsValue)
+    {
+        value = flagsValue;
+        return *this;
+    }
+
+    BASE_TYPE value;
+
+    static_assert(sizeof(T) == sizeof(BASE_TYPE));
+};
+
+template<typename T, typename BASE_TYPE>
+flags_t<T, BASE_TYPE>& operator|=(flags_t<T, BASE_TYPE>& a, const T& b)
+{
+    a.value |= (BASE_TYPE)b;
+    return a;
+}
+
+template<typename T, typename BASE_TYPE>
+flags_t<T, BASE_TYPE>& operator&=(flags_t<T, BASE_TYPE>& a, const T& b)
+{
+    a.value &= (BASE_TYPE)b;
+    return a;
+}
+
+template<typename T, typename BASE_TYPE>
+BASE_TYPE operator&(const flags_t<T, BASE_TYPE>& flags, T flag)
+{
+    BASE_TYPE rawFlags = flags.value;
+    return rawFlags & flag;
+}
+
+
+template<typename T>
+struct flags8_t : flags_t<T, uint8_t>
+{
+    flags8_t<T>& operator=(const uint8_t flagsValue)
+    {
+        value = flagsValue;
+        return *this;
+    }
+};
+
+template<typename T>
+struct flags16_t : flags_t<T, uint16_t>
+{
+    flags16_t<T>& operator=(const uint16_t flagsValue)
+    {
+        value = flagsValue;
+        return *this;
+    }
+};
+
+template<typename T>
+struct flags32_t : flags_t<T, uint32_t>
+{
+    flags32_t<T>& operator=(const uint32_t flagsValue)
+    {
+        value = flagsValue;
+        return *this;
+    }
 };
 
 struct memory_allocator_t
@@ -159,6 +235,31 @@ struct result_t
     }
 };
 
+const char* getResultString(const result_status_t result)
+{
+    switch(result)
+    {
+        case result_status_t::compilation_error:
+            return "compilation error";
+        case result_status_t::file_not_found:
+            return "file not found";
+        case result_status_t::internal_error:
+            return "internal error";
+        case result_status_t::invalid_arguments:
+            return "invalid arguments";
+        case result_status_t::out_of_memory:
+            return "out of memory";
+        case result_status_t::success:
+            return "success";
+        default:
+            DebugBreak();
+            break;
+    }
+
+    UNREACHABLE_CODE();
+    return nullptr;
+}
+
 struct render_target_t
 {
     d3d12_resource_t            resource;
@@ -204,12 +305,9 @@ struct render_pass_t
     render_pass_t*              pNext;
 };
 
-struct staging_buffer_t
+struct graphics_pipeline_state_t
 {
-    uint64_t capacityInBytes;
-    uint64_t remainingSizeInBytes;
-    d3d12_resource_t bufferResource;
-    staging_buffer_t* pNext;
+    ID3D12PipelineState* pPipelineState;
 };
 
 enum upload_buffer_flags_t : uint8_t
@@ -219,21 +317,20 @@ enum upload_buffer_flags_t : uint8_t
 
 struct upload_buffer_t
 {
-    uint64_t            startStagingBufferByteIndex;
-    uint64_t            sizeInBytes;
+    uint32_t            sizeInBytes;
     void*               pData;
-    d3d12_resource_t*   pBufferResource;
+    d3d12_resource_t    bufferResource;
     upload_buffer_t*    pNext;
 };
 
 enum vertex_attribute_t : uint8_t
 {
-    vertex_attribute_position
+    position
 };
 
 enum vertex_attribute_type_t : uint8_t
 {
-    vertex_attribute_type_float
+    float32
 };
 
 struct vertex_attribute_entry_t
@@ -241,21 +338,6 @@ struct vertex_attribute_entry_t
     vertex_attribute_t      attribute;
     vertex_attribute_type_t type;
     uint32_t                count;
-};
-
-struct resource_handle_t
-{
-    uint32_t index;
-};
-
-struct vertex_buffer_handle_t : resource_handle_t
-{
-
-};
-
-struct upload_buffer_handle_t : resource_handle_t
-{
-
 };
 
 struct vertex_format_t
@@ -267,29 +349,90 @@ struct vertex_format_t
 struct vertex_buffer_t
 {
     d3d12_resource_t bufferResource;
+    uint32_t         sizeInBytes;
+};
+
+struct shader_binary_t
+{
+    const uint8_t* pShaderBlob;
+    uint32_t shaderBlobSizeInBytes;
+    shader_binary_t* pNext;
+};
+
+struct render_pass_parameters_t
+{
+    render_target_t* pRenderTarget; // nullptr = backbuffer
+    shader_binary_t* pVertexShader;
+    shader_binary_t* pPixelShader;
+};
+
+struct graphics_pipeline_state_parameters_t
+{
+    const char*         pName;
+    shader_binary_t*    pVertexShader;
+    shader_binary_t*    pPixelShader;
+    vertex_format_t*    pVertexFormat;
+};
+
+struct base_dynamic_array_t
+{
+    memory_allocator_t* pMemoryAllocator;
+    void*               pData;
+    uint32_t            count;
+    uint32_t            capacity;
+    uint32_t            elementSizeInBytes;
+};
+
+template<typename T>
+struct auto_resource_t
+{
+    T operator()
+    {
+        return resource;
+    }
+
+    T resource;
+};
+
+template<typename T>
+struct dynamic_array_t : base_dynamic_array_t
+{
+};
+
+enum render_resource_flags_t : uint8_t
+{
+    none                    = 0,
+    notify_on_array_grow    = 0x01
+};
+
+struct render_resource_cache_t
+{
+    memory_allocator_t*                 pMemoryAllocator;
+    dynamic_array_t<vertex_buffer_t>    vertexBuffers;
+    dynamic_array_t<render_pass_t>      renderPasses;
+    dynamic_array_t<render_target_t>    renderTargets;
+    dynamic_array_t<vertex_format_t>    vertexFormats;
+    dynamic_array_t<graphics_pipeline_state_t>   pipelineStates;
+    dynamic_array_t<upload_buffer_t>    uploadBuffers;
+    dynamic_array_t<shader_binary_t>    shaderBinaries;
+
+    render_pass_t*                      pFirstFreeRenderPass;
+
+    flags8_t<render_resource_flags_t>   flags;
 };
 
 struct graphics_frame_t
 {
+    memory_allocator_t                      tempMemoryAllocator;
+    render_resource_cache_t*                pRenderResourceCache;
     shader_compiler_context_t*              pShaderCompilerContext;
     render_target_t*                        pBackBuffer;
-    render_pass_t*                          pRenderPassBuffer;
     memory_allocator_t*                     pMemoryAllocator;
-    memory_allocator_t*                     pTempMemoryAllocator;
     render_pass_t*                          pFirstRenderPassToExecute;
     render_pass_t*                          pLastRenderPassToExecute;
-    staging_buffer_t*                       pFirstStagingBuffer;
-    upload_buffer_t**                       ppUploadBuffers;
-    vertex_buffer_t**                       ppVertexBuffers;
+    upload_buffer_t*                        pFirstUploadBuffer;
     uint64_t                                frameIndex;
-    uint32_t                                vertexBufferCount;
-    uint32_t                                uploadBufferCount;
-    uint32_t                                renderPassIndex;
-    uint32_t                                renderPassCount;
-    uint32_t                                maxVertexBufferCount;
-    uint32_t                                maxUploadBufferCount;
     uint32_t                                openRenderPassCount;
-    uint32_t                                defaultStagingBufferSizeInBytes;
     D3D12DeviceType*                        pDevice;
     ID3D12Fence*                            pFrameFence;
     ID3D12GraphicsCommandList*              pFrameGeneralGraphicsQueue;
@@ -319,6 +462,7 @@ struct render_context_t
     D3D12DebugType*             pDebugLayer;
     DXGIFactoryType*            pFactory;
 
+    render_resource_cache_t     renderResourceCache;
     shader_compiler_context_t   shaderCompilerContext;
     memory_allocator_t          defaultAllocator;
     graphics_frame_collection_t graphicsFramesCollection;
@@ -373,6 +517,31 @@ constexpr uint64_t          defaultAllocationAlignment      = 16u;
 constexpr uint32_t          invalidResourceHandleValue      = ~0u;
 constexpr memory_buffer_t   emptyMemoryBuffer               = {nullptr, 0u};
 
+template<typename T>
+T createInvalidResourceHandle()
+{
+    T handle = {invalidResourceHandleValue};
+    return handle;
+}
+
+template<typename T>
+T createResourceHandle(uint32_t resourceIndex)
+{
+    T handle = {resourceIndex};
+    return handle;
+}
+
+template<typename T>
+bool isInvalidResourceHandle(const T& resourceHandle)
+{
+    return resourceHandle.index == invalidResourceHandleValue;
+}
+
+void copyMemoryNonOverlapping(void* pDst, const void* pSrc, const uint64_t sizeInBytes)
+{
+    memcpy(pDst, pSrc, sizeInBytes);
+}
+
 void logError(const char* pErrorFormat, ...)
 {
     printf("Error: ");
@@ -380,6 +549,20 @@ void logError(const char* pErrorFormat, ...)
     va_list vaList;
     va_start(vaList, pErrorFormat);
     vprintf(pErrorFormat, vaList);
+    fflush(stdout);
+    va_end(vaList);
+
+    printf("\n");
+}
+
+void logWarning(const char* pErrorFormat, ...)
+{
+    printf("Warning: ");
+
+    va_list vaList;
+    va_start(vaList, pErrorFormat);
+    vprintf(pErrorFormat, vaList);
+    fflush(stdout);
     va_end(vaList);
 
     printf("\n");
@@ -390,11 +573,11 @@ assert_result_t handleAssert(const char* pExpression, const char* pUserMessage)
     char messageBuffer[1024] = {0};
     if(pUserMessage == nullptr)
     {
-        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n\nPress Try to continue\nPress Continue to debug\nPress Cancel to exit application.", pExpression);
+        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n\nPress Try Again to debug\nPress Continue to ignore this assert\nPress Cancel to exit application.", pExpression);
     }
     else
     {
-        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n===============\n%s\n===============\n\nPress Try to continue\nPress Continue to debug\nPress Cancel to exit application.", pExpression, pUserMessage);
+        sprintf_s(messageBuffer, sizeof(messageBuffer), "Error in Expression '%s'\n===============\n%s\n===============\n\nPress Try Again to continue\nPress Continue to ignore this assert\nPress Cancel to exit application.", pExpression, pUserMessage);
     }
     const int messageBoxResult = MessageBoxA(nullptr, messageBuffer, "DEBUG ASSERT", MB_CANCELTRYCONTINUE | MB_ICONERROR | MB_DEFBUTTON1);
     if(messageBoxResult == IDCANCEL)
@@ -490,6 +673,11 @@ HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCal
     return originalResult;
 }
 
+void resetAllocator(memory_allocator_t* pAllocator)
+{
+    
+}
+
 void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, alloc_flags_t flags = alloc_flag_none)
 {
     void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, defaultAllocationAlignment);
@@ -547,31 +735,19 @@ void createDefaultMemoryAllocator(memory_allocator_t* pAllocator)
     pAllocator->freeFnc     = freeFromDefaultAllocator;
 }
 
-void printErrorToFile(const char* p_FileName)
+shader_binary_t* allocateShaderBinary(graphics_frame_t* pGraphicsFrame)
 {
-	DWORD errorId = GetLastError();
-	char* textBuffer = 0;
-	DWORD writtenChars = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER, 0, errorId, 
-		MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), (LPSTR)&textBuffer, 512, 0);
-
-	if (writtenChars > 0)
-	{
-		FILE* file = fopen(p_FileName, "w");
-
-		if (file)
-		{
-			fwrite(textBuffer, writtenChars, 1, file);			
-			fflush(file);
-			fclose(file);
-		}
-	}
+    return (shader_binary_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(shader_binary_t));
 }
 
-void allocateDebugConsole()
+void freeShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pShaderBinary)
 {
-	AllocConsole();
-	AttachConsole(ATTACH_PARENT_PROCESS);
-	freopen("CONOUT$", "w", stdout);
+    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pShaderBinary);
+}
+
+void freeUploadBuffer(render_resource_cache_t* pRenderResourceCache, upload_buffer_t* pUploadBuffer)
+{
+    //TODO
 }
 
 void initializeRenderTarget(render_target_t* pRenderTarget, ID3D12Resource* pRenderTargetResource, D3D12_CPU_DESCRIPTOR_HANDLE* pDescriptorHandle, D3D12_RESOURCE_STATES state)
@@ -630,121 +806,6 @@ void flushAllFrames(render_context_t* pRenderContext)
         graphics_frame_t* pGraphicsFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
         flushFrame(pGraphicsFrame);
     }
-}
-
-void windowResized(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
-{
-    render_context_t* pRenderContext = (render_context_t*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
-    if(pRenderContext == nullptr)
-        return;
-
-    const uint32_t newWidth = LOWORD(lparam);
-    const uint32_t newHeight = HIWORD(lparam);
-
-    flushAllFrames(pRenderContext);
-
-    for(uint32_t bufferIndex = 0u; bufferIndex < pRenderContext->swapChain.backBufferCount; ++bufferIndex)
-    {
-        destroyRenderTarget(&pRenderContext->swapChain.pBackBuffers[bufferIndex]);
-    }
-
-    pRenderContext->swapChain.pSwapChain->ResizeBuffers(0u, newWidth, newHeight, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
-
-    resetDescriptorHeap(&pRenderContext->swapChain.backBufferRenderTargetDescriptorHeap);
-
-    for(uint32_t bufferIndex = 0u; bufferIndex < pRenderContext->swapChain.backBufferCount; ++bufferIndex)
-    {
-        ID3D12Resource* pFrameBuffer = nullptr;
-        COM_CALL(pRenderContext->swapChain.pSwapChain->GetBuffer(bufferIndex, IID_PPV_ARGS(&pFrameBuffer)));
-
-        D3D12_CPU_DESCRIPTOR_HANDLE descriptorHandle = getNextCPUDescriptorHandle(&pRenderContext->swapChain.backBufferRenderTargetDescriptorHeap);
-        pRenderContext->pDevice->CreateRenderTargetView(pFrameBuffer, nullptr, descriptorHandle);
-
-        initializeRenderTarget(&pRenderContext->swapChain.pBackBuffers[bufferIndex], pFrameBuffer, &descriptorHandle, D3D12_RESOURCE_STATE_PRESENT);
-    }
-}
-
-LRESULT CALLBACK D3D12TestAppWindowProc(HWND p_HWND, UINT p_Message, WPARAM p_wParam, LPARAM p_lParam)
-{
-	bool messageHandled = false;
-
-	switch (p_Message)
-	{
-	case WM_CLOSE:
-        DestroyWindow(p_HWND);
-		messageHandled = true;
-		break;
-
-    case WM_DESTROY:
-		PostQuitMessage(0);
-		messageHandled = true;
-        break;
-
-	case WM_KEYDOWN:
-	case WM_KEYUP:
-	case WM_SYSKEYDOWN:
-	case WM_SYSKEYUP:
-		break;
-
-	case WM_LBUTTONUP:
-	case WM_MBUTTONUP:
-	case WM_RBUTTONUP:
-	case WM_XBUTTONUP:
-	case WM_LBUTTONDOWN:
-	case WM_RBUTTONDOWN:
-	case WM_MBUTTONDOWN:
-	case WM_XBUTTONDOWN:
-		break;
-
-	case WM_MOUSEMOVE:
-		break;
-
-	case WM_MOUSEWHEEL:
-		break;
-    
-    case WM_SIZE:
-        windowResized(p_HWND, p_Message, p_wParam, p_lParam);
-        messageHandled = true;
-        break;
-	}
-
-	if (messageHandled == false)
-	{
-		return DefWindowProc(p_HWND, p_Message, p_wParam, p_lParam);
-	}
-
-	return 0;
-}
-
-HWND setupWindow(HINSTANCE p_Instance, int p_Width, int p_Height)
-{
-	WNDCLASS wndClass = {0};
-	wndClass.style = CS_HREDRAW | CS_OWNDC | CS_VREDRAW;
-	wndClass.hInstance = p_Instance;
-	wndClass.lpszClassName = "D3D12RenderWindow";
-	wndClass.lpfnWndProc = D3D12TestAppWindowProc;
-	wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
-	RegisterClass(&wndClass);
-
-	HWND hwnd = CreateWindowA("D3D12RenderWindow", "D3D12 Renderer",
-		WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-		p_Width, p_Height, 0, 0, p_Instance, 0);
-
-	if (hwnd == INVALID_HANDLE_VALUE)
-		MessageBox(0, "Error creating Window.\n", "Error!", 0);
-	else
-		ShowWindow(hwnd, SW_SHOW);
-	return hwnd;
-}
-
-uint32_t getTimeInMilliseconds(LARGE_INTEGER p_PerformanceFrequency)
-{
-	LARGE_INTEGER appTime = {0};
-	QueryPerformanceFrequency(&appTime);
-
-	appTime.QuadPart *= 1000; //to milliseconds
-
-	return (uint32_t)(appTime.QuadPart / p_PerformanceFrequency.QuadPart);
 }
 
 void transitionResource(ID3D12GraphicsCommandList* pGraphicsCommandList, d3d12_resource_t* pResource, D3D12_RESOURCE_STATES newState)
@@ -997,6 +1058,7 @@ void destroyGraphicsFrame(graphics_frame_t* pGraphicsFrame)
         CloseHandle(pGraphicsFrame->pFrameFinishedEvent);
     }
 
+#if 0
     for(uint32_t renderPassIndex = 0u; renderPassIndex < pGraphicsFrame->renderPassCount; ++renderPassIndex)
     {
         COM_RELEASE(pGraphicsFrame->pRenderPassBuffer[renderPassIndex].pGraphicsCommandList);
@@ -1004,8 +1066,7 @@ void destroyGraphicsFrame(graphics_frame_t* pGraphicsFrame)
     }
 
     freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->pRenderPassBuffer);
-    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->ppVertexBuffers);
-    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->ppUploadBuffers);
+#endif
 
     COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator);
     COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsQueue);
@@ -1044,7 +1105,7 @@ bool isValidGraphicsFrameParameters(const graphics_frame_parameters_t* pGraphics
     return true;
 }
 
-bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice)
+bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, render_resource_cache_t* pRenderResourceCache, shader_compiler_context_t* pShaderCompilerContext, D3D12DeviceType* pDevice)
 {
     ASSERT_DEBUG(pGraphicsFrameParameters != nullptr);
     ASSERT_DEBUG(pMemoryAllocator != nullptr);
@@ -1054,10 +1115,14 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
     graphics_frame_t graphicsFrame = {0};
     graphicsFrame.pMemoryAllocator = pMemoryAllocator;
     graphicsFrame.pFrameFinishedEvent = CreateEvent(nullptr, FALSE, TRUE, "");
+    graphicsFrame.pShaderCompilerContext = pShaderCompilerContext;
+    graphicsFrame.pRenderResourceCache = pRenderResourceCache;
     if(graphicsFrame.pFrameFinishedEvent == nullptr)
     {
         return false;
     }
+
+    createDefaultMemoryAllocator(&graphicsFrame.tempMemoryAllocator);
 
     render_pass_t* pRenderPasses = (render_pass_t*)allocateFromAllocator(pMemoryAllocator, (sizeof(render_pass_t) * pGraphicsFrameParameters->maxRenderPassCount), alloc_flag_clear_memory);
     if(pRenderPasses == nullptr)
@@ -1065,14 +1130,14 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         goto cleanup_and_exit_failure;
     }
 
-    vertex_buffer_t** ppVertexBuffers = (vertex_buffer_t**)allocateFromAllocator(pMemoryAllocator, sizeof(void*) * pGraphicsFrameParameters->maxVertexBufferCount, alloc_flag_clear_memory);
-    if(ppVertexBuffers == nullptr)
+    vertex_buffer_t* pVertexBuffers = (vertex_buffer_t*)allocateFromAllocator(pMemoryAllocator, sizeof(vertex_buffer_t) * pGraphicsFrameParameters->maxVertexBufferCount, alloc_flag_clear_memory);
+    if(pVertexBuffers == nullptr)
     {
         goto cleanup_and_exit_failure;
     }
 
-    upload_buffer_t** ppUploadBuffers = (upload_buffer_t**)allocateFromAllocator(pMemoryAllocator, sizeof(void*) * pGraphicsFrameParameters->maxUploadBufferCount, alloc_flag_clear_memory);
-    if(ppUploadBuffers == nullptr)
+    upload_buffer_t* pUploadBuffers = (upload_buffer_t*)allocateFromAllocator(pMemoryAllocator, sizeof(upload_buffer_t) * pGraphicsFrameParameters->maxUploadBufferCount, alloc_flag_clear_memory);
+    if(pUploadBuffers == nullptr)
     {
         goto cleanup_and_exit_failure;
     }
@@ -1100,14 +1165,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         }
     }
 
-    graphicsFrame.pDevice                           = pDevice;
-    graphicsFrame.pRenderPassBuffer                 = pRenderPasses;
-    graphicsFrame.ppUploadBuffers                   = ppUploadBuffers;
-    graphicsFrame.ppVertexBuffers                   = ppVertexBuffers;
-    graphicsFrame.renderPassCount                   = pGraphicsFrameParameters->maxRenderPassCount;
-    graphicsFrame.maxUploadBufferCount              = pGraphicsFrameParameters->maxUploadBufferCount;
-    graphicsFrame.maxVertexBufferCount              = pGraphicsFrameParameters->maxVertexBufferCount;
-    graphicsFrame.defaultStagingBufferSizeInBytes   = pGraphicsFrameParameters->defaultStagingBufferSizeInBytes;
+    graphicsFrame.pDevice = pDevice;
 
     if(!createFence(pDevice, &graphicsFrame.pFrameFence, 0))
     {
@@ -1122,7 +1180,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         return false;
 }
 
-bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrameCollection, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, D3D12DeviceType* pDevice, const uint8_t frameCount)
+bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrameCollection, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, render_resource_cache_t* pRenderResourceCache, shader_compiler_context_t* pShaderCompilerContext, D3D12DeviceType* pDevice, const uint8_t frameCount)
 {
     graphics_frame_collection_t graphicFrameCollection = {};
     graphicFrameCollection.pMemoryAllocator = pMemoryAllocator;
@@ -1135,7 +1193,7 @@ bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrame
 
     for(uint32_t frameIndex = 0u; frameIndex < frameCount; ++frameIndex)
     {
-        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], pGraphicsFrameParameters, pMemoryAllocator, pDevice))
+        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], pGraphicsFrameParameters, pMemoryAllocator, pRenderResourceCache, pShaderCompilerContext, pDevice))
         {
             goto cleanup_and_exit_failure;
         }
@@ -1157,23 +1215,33 @@ graphics_frame_t* getCurrentFrame(render_context_t* pRenderContext)
     return getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
 }
 
+enum render_context_flags_t : uint8_t
+{
+    use_debug_layer = 0x01,
+    notify_on_limit_reach = 0x02
+};
+
 struct render_context_parameters_t
 {
-    memory_allocator_t* pAllocator;
-    HWND                pWindowHandle;
-    uint32_t            windowWidth;
-    uint32_t            windowHeight;
-    uint32_t            frameBufferCount;
+    memory_allocator_t*                 pAllocator;
+    HWND                                pWindowHandle;
+    uint32_t                            windowWidth;
+    uint32_t                            windowHeight;
+    uint32_t                            frameBufferCount;
+    
+    flags8_t<render_context_flags_t>    flags;
 
-    struct
+    struct limits_t
     {
-        uint32_t        maxVertexBufferCount;
-        uint32_t        maxUploadBufferCount;
-        uint32_t        maxRenderPassCount;
-        uint32_t        defaultStagingBufferSizeInBytes;
+        uint32_t                        maxVertexBufferCount;
+        uint32_t                        maxUploadBufferCount;
+        uint32_t                        maxVertexFormatCount;
+        uint32_t                        maxShaderBinaryCount;
+        uint32_t                        maxRenderPassCount;
+        uint32_t                        maxRenderTargetCount;
+        uint32_t                        maxPipelineStateCount;
+        uint32_t                        defaultStagingBufferSizeInBytes;
     } limits;
-
-    bool                useDebugLayer;
 };
 
 struct ComCustomMalloc : IMalloc
@@ -1273,7 +1341,156 @@ bool createShaderCompilerContext(memory_allocator_t* pAllocator, shader_compiler
     return true;
 }
 
-bool initializeRenderContext(render_context_t* pRenderContext, const render_context_parameters_t* pParameters)
+template<typename T>
+void createDynamicArrayWithPreallocatedMemory(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, void* pPreallocatedMemory, const uint32_t elementCapacity)
+{
+    pOutArray->pMemoryAllocator     = pMemoryAllocator;
+    pOutArray->pData                = (T*)pPreallocatedMemory;
+    pOutArray->count                = 0u;
+    pOutArray->capacity             = elementCapacity;
+    pOutArray->elementSizeInBytes   = sizeof(T);
+}
+
+void* pushBackFromDynamicArrayDontGrow(base_dynamic_array_t* pArray, const uint32_t count)
+{
+    const uint32_t newArrayCount = pArray->count + count;
+    if(newArrayCount >= pArray->capacity)
+    {
+        return nullptr;
+    }
+
+    void* pData = (uint8_t*)pArray->pData + pArray->count * pArray->elementSizeInBytes;
+    pArray->count += count;
+
+    return pData;
+}
+
+uint32_t calculateNewDynamicArrayCapacity(const base_dynamic_array_t* pArray)
+{
+    return pArray->capacity * 2u;
+}
+
+bool tryToGrowDynamicArray(base_dynamic_array_t* pArray)
+{
+    const uint32_t newCapacity = calculateNewDynamicArrayCapacity(pArray);
+    void* pNewData = allocateFromAllocator(pArray->pMemoryAllocator, newCapacity * pArray->elementSizeInBytes);
+    if(pNewData == nullptr)
+    {
+        return false;
+    }
+
+    copyMemoryNonOverlapping(pNewData, pArray->pData, pArray->capacity * pArray->elementSizeInBytes);
+    freeFromAllocator(pArray->pMemoryAllocator, pArray->pData);
+    pArray->pData = pNewData;
+    pArray->capacity = newCapacity;
+
+    return true;
+}
+
+render_pass_t* createRenderPassChain(render_pass_t* pRenderPasses, const uint32_t renderPassCount)
+{
+    ASSERT_DEBUG(pRenderPasses != nullptr);
+    ASSERT_DEBUG(renderPassCount > 0u);
+
+    render_pass_t* pCurrentRenderPass = pRenderPasses;
+    render_pass_t* pNextRenderPass = pRenderPasses + 1;
+    uint32_t renderPassIndex = 0u;
+    while(true)
+    {
+        if((renderPassIndex + 1) == renderPassCount)
+        {
+            pCurrentRenderPass->pNext = nullptr;
+            break;
+        }
+
+        pCurrentRenderPass->pNext = pNextRenderPass;
+        pCurrentRenderPass = pNextRenderPass;
+        pNextRenderPass = pNextRenderPass + 1;
+        ++renderPassIndex;
+    }
+
+    return pRenderPasses;
+}
+
+bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPassInChain)
+{
+    render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
+    while(pCurrentRenderPass != nullptr)
+    {
+        
+        if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, &pCurrentRenderPass->pGraphicsCommandAllocator))
+        {
+            return false;
+        }
+
+        if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, pCurrentRenderPass->pGraphicsCommandAllocator, &pCurrentRenderPass->pGraphicsCommandList))
+        {
+            return false;
+        }
+
+        pCurrentRenderPass = pCurrentRenderPass->pNext;
+    }
+
+    return true;
+}
+
+bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t* pOutRenderResourceCache, memory_allocator_t* pMemoryAllocator, const render_context_parameters_t::limits_t* pLimits, const bool notifyOnLimitReach)
+{
+    uint64_t totalAllocationSizeInBytes = 0u;
+    totalAllocationSizeInBytes += sizeof(vertex_buffer_t) * pLimits->maxVertexBufferCount;
+    totalAllocationSizeInBytes += sizeof(vertex_format_t) * pLimits->maxVertexFormatCount;
+    totalAllocationSizeInBytes += sizeof(shader_binary_t) * pLimits->maxShaderBinaryCount;
+    totalAllocationSizeInBytes += sizeof(render_target_t) * pLimits->maxRenderTargetCount;
+    totalAllocationSizeInBytes += sizeof(graphics_pipeline_state_t) * pLimits->maxPipelineStateCount;
+    totalAllocationSizeInBytes += sizeof(upload_buffer_t) * pLimits->maxUploadBufferCount;
+    totalAllocationSizeInBytes += sizeof(render_pass_t) * pLimits->maxRenderPassCount;
+
+    uint8_t* pResourceBlob = (uint8_t*)allocateFromAllocator(pMemoryAllocator, totalAllocationSizeInBytes, alloc_flag_clear_memory);
+    if(pResourceBlob == nullptr)
+    {
+        return false;
+    }
+
+    uint64_t offsetInBytes = 0u;
+    createDynamicArrayWithPreallocatedMemory<vertex_buffer_t>(&pOutRenderResourceCache->vertexBuffers, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxVertexBufferCount);
+    offsetInBytes += sizeof(vertex_buffer_t) * pLimits->maxVertexBufferCount;
+
+    createDynamicArrayWithPreallocatedMemory<vertex_format_t>(&pOutRenderResourceCache->vertexFormats, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxVertexFormatCount);
+    offsetInBytes += sizeof(vertex_format_t) * pLimits->maxVertexFormatCount;
+    
+    createDynamicArrayWithPreallocatedMemory<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxShaderBinaryCount);
+    offsetInBytes += sizeof(shader_binary_t) * pLimits->maxShaderBinaryCount;
+
+    createDynamicArrayWithPreallocatedMemory<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxRenderTargetCount);
+    offsetInBytes += sizeof(render_target_t) * pLimits->maxRenderTargetCount;
+
+    createDynamicArrayWithPreallocatedMemory<graphics_pipeline_state_t>(&pOutRenderResourceCache->pipelineStates, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxPipelineStateCount);
+    offsetInBytes += sizeof(graphics_pipeline_state_t) * pLimits->maxPipelineStateCount;
+
+    createDynamicArrayWithPreallocatedMemory<upload_buffer_t>(&pOutRenderResourceCache->uploadBuffers, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxUploadBufferCount);
+    offsetInBytes += sizeof(upload_buffer_t) * pLimits->maxUploadBufferCount;
+
+    createDynamicArrayWithPreallocatedMemory<render_pass_t>(&pOutRenderResourceCache->renderPasses, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxRenderPassCount);
+    offsetInBytes += sizeof(render_pass_t) * pLimits->maxRenderPassCount;
+
+    pOutRenderResourceCache->flags = 0u;
+    pOutRenderResourceCache->pMemoryAllocator = pMemoryAllocator;
+    
+    if(notifyOnLimitReach)
+    {
+        pOutRenderResourceCache->flags |= render_resource_flags_t::notify_on_array_grow;
+    }
+
+    pOutRenderResourceCache->pFirstFreeRenderPass = createRenderPassChain((render_pass_t*)pOutRenderResourceCache->renderPasses.pData, pOutRenderResourceCache->renderPasses.capacity);
+    if(!initRenderPassChain(pDevice, pOutRenderResourceCache->pFirstFreeRenderPass))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool createRenderContext(render_context_t* pRenderContext, const render_context_parameters_t* pParameters)
 {
     ASSERT_DEBUG(isValidRenderContextParameters(pParameters));
 
@@ -1287,7 +1504,7 @@ bool initializeRenderContext(render_context_t* pRenderContext, const render_cont
         createDefaultMemoryAllocator(&pRenderContext->defaultAllocator);
     }
 
-    bool useDebugLayer = pParameters->useDebugLayer;
+    bool useDebugLayer = pParameters->flags & render_context_flags_t::use_debug_layer;
     if(useDebugLayer)
     {
         useDebugLayer = enableD3D12DebugLayer(&pRenderContext->pDebugLayer);
@@ -1328,7 +1545,7 @@ bool initializeRenderContext(render_context_t* pRenderContext, const render_cont
     graphicsFrameParameters.maxUploadBufferCount            = pParameters->limits.maxUploadBufferCount;
     graphicsFrameParameters.maxVertexBufferCount            = pParameters->limits.maxVertexBufferCount;
     graphicsFrameParameters.defaultStagingBufferSizeInBytes = pParameters->limits.defaultStagingBufferSizeInBytes;
-    if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &graphicsFrameParameters, &pRenderContext->defaultAllocator, pRenderContext->pDevice, pParameters->frameBufferCount))
+    if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &graphicsFrameParameters, &pRenderContext->defaultAllocator, &pRenderContext->renderResourceCache, &pRenderContext->shaderCompilerContext, pRenderContext->pDevice, pParameters->frameBufferCount))
     {
         return false;
     }
@@ -1339,6 +1556,12 @@ bool initializeRenderContext(render_context_t* pRenderContext, const render_cont
         {
 
         }
+    }
+
+    const bool notifyOnLimitReach = pParameters->flags & render_context_flags_t::notify_on_limit_reach;
+    if(!createRenderResourceCache(pRenderContext->pDevice, &pRenderContext->renderResourceCache, &pRenderContext->defaultAllocator, &pParameters->limits, notifyOnLimitReach))
+    {
+        return false;
     }
 
     pRenderContext->frameIndex = 1u;
@@ -1357,11 +1580,6 @@ graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
     graphics_frame_t* pPreviousFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, previousFrameIndex);
     graphics_frame_t* pGraphicsFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
     
-    memcpy(pGraphicsFrame->ppUploadBuffers, pPreviousFrame->ppUploadBuffers, pPreviousFrame->uploadBufferCount * sizeof(void*));
-    memcpy(pGraphicsFrame->ppVertexBuffers, pPreviousFrame->ppVertexBuffers, pPreviousFrame->vertexBufferCount * sizeof(void*));
-    pGraphicsFrame->uploadBufferCount = pPreviousFrame->uploadBufferCount;
-    pGraphicsFrame->vertexBufferCount = pPreviousFrame->vertexBufferCount;
-
     flushFrame(pGraphicsFrame);
     resetFrame(pGraphicsFrame);
 
@@ -1371,7 +1589,22 @@ graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
     pGraphicsFrame->frameIndex = pRenderContext->frameIndex;
     pGraphicsFrame->pBackBuffer = pRenderContext->swapChain.pBackBuffers + currentBackBufferIndex;
     ++pRenderContext->frameIndex;
+
+    resetAllocator(&pGraphicsFrame->tempMemoryAllocator);
     return pGraphicsFrame;
+}
+
+void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, render_pass_t* pFirstRenderPassInChain)
+{
+    render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
+    while(pCurrentRenderPass != nullptr)
+    {
+        render_pass_t* pNextRenderPass = pCurrentRenderPass->pNext;
+        pCurrentRenderPass->pNext = pRenderResourceCache->pFirstFreeRenderPass;
+        pRenderResourceCache->pFirstFreeRenderPass = pCurrentRenderPass;
+
+        pCurrentRenderPass = pNextRenderPass;
+    }
 }
 
 void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFrame)
@@ -1394,11 +1627,12 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
         pRenderPass = pRenderPass->pNext;
     }
 
+    markRenderPassChainAsFree(pGraphicsFrame->pRenderResourceCache, pGraphicsFrame->pFirstRenderPassToExecute);
+
     COM_CALL(pRenderContext->pDefaultDirectCommandQueue->Signal(pGraphicsFrame->pFrameFence, pGraphicsFrame->frameIndex));
     
     pGraphicsFrame->pFirstRenderPassToExecute = nullptr;
     pGraphicsFrame->pLastRenderPassToExecute = nullptr;
-    pGraphicsFrame->renderPassIndex = 0;
 
     COM_CALL(pRenderContext->swapChain.pSwapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
     COM_CALL(pGraphicsFrame->pFrameFence->SetEventOnCompletion(pGraphicsFrame->frameIndex, pGraphicsFrame->pFrameFinishedEvent));
@@ -1406,32 +1640,75 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
     pRenderContext->pCurrentGraphicsFrame = nullptr;
 }
 
-struct shader_binary_t
+void* allocateFromRenderResourceCacheGeneric(base_dynamic_array_t* pResourceArray, const bool notifyOnGrow, const char* pResourceName)
 {
+    void* pRenderResourceData = pushBackFromDynamicArrayDontGrow(pResourceArray, 1u);
+    if(pRenderResourceData == nullptr)
+    {
+        if(notifyOnGrow)
+        {
+            logWarning("Reached limit of %u %s. Need to allocate from main memory to make room for more %s, new limit = %u", pResourceArray->capacity, pResourceName, calculateNewDynamicArrayCapacity(pResourceArray), pResourceName);
+        }
 
-};
+        if(!tryToGrowDynamicArray(pResourceArray))
+        {
+            return nullptr;
+        }
 
-struct render_pass_parameters_t
+        pRenderResourceData = pushBackFromDynamicArrayDontGrow(pResourceArray, 1u);
+        if(pRenderResourceData == nullptr)
+        {
+            return nullptr;
+        }
+    }
+
+    return pRenderResourceData;
+}
+
+shader_binary_t* allocateShaderBinary(render_resource_cache_t* pRenderResourceCache)
 {
-    render_target_t* pRenderTarget; // nullptr = backbuffer
-    shader_binary_t* pVertexShader;
-    shader_binary_t* pPixelShader;
-};
+    return (shader_binary_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "shader binaries");
+}
+
+vertex_format_t* allocateVertexFormat(render_resource_cache_t* pRenderResourceCache)
+{
+    return (vertex_format_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->vertexFormats, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "vertex formats");
+}
+
+render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
+{
+    if(pRenderResourceCache->pFirstFreeRenderPass == nullptr)
+    {
+        DebugBreak();
+    }
+
+    render_pass_t* pFreeRenderPass = pRenderResourceCache->pFirstFreeRenderPass;
+    pRenderResourceCache->pFirstFreeRenderPass = pFreeRenderPass->pNext;
+    return pFreeRenderPass;
+}
+
+graphics_pipeline_state_t* allocatePipelineState(render_resource_cache_t* pRenderResourceCache)
+{
+    return (graphics_pipeline_state_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->pipelineStates, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "pipeline state objects");
+}
+
+upload_buffer_t* allocateUploadBuffer(render_resource_cache_t* pRenderResourceCache)
+{
+    return (upload_buffer_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->uploadBuffers, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "upload buffers");
+}
 
 render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRenderPassName)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
 
-    const uint32_t nextRenderPassIndex = (pGraphicsFrame->renderPassIndex + 1);
-    if(nextRenderPassIndex >= pGraphicsFrame->renderPassCount)
+    render_pass_t* pRenderPass = getFreeRenderPass(pGraphicsFrame->pRenderResourceCache);
+    if(pRenderPass == nullptr)
     {
         return nullptr;
     }
 
-    render_pass_t* pRenderPass = pGraphicsFrame->pRenderPassBuffer + pGraphicsFrame->renderPassIndex;
-    pGraphicsFrame->renderPassIndex = nextRenderPassIndex;
     ++pGraphicsFrame->openRenderPassCount;
-    
+
     COM_CALL(pRenderPass->pGraphicsCommandAllocator->Reset());
     COM_CALL(pRenderPass->pGraphicsCommandList->Reset(pRenderPass->pGraphicsCommandAllocator, nullptr));
     pRenderPass->isOpen = true;
@@ -1444,9 +1721,9 @@ render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRe
 
 void endRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderPass)
 {
-    ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pGraphicsFrame->openRenderPassCount > 0);
+    ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(pRenderPass->isOpen);
 
     pRenderPass->isOpen = false;
@@ -1464,11 +1741,45 @@ bool isColorRenderTarget(render_target_t* pRenderTarget)
     return true;
 }
 
+uint32_t getVertexAttributeTypeSizeInBytes(const vertex_attribute_type_t attributeType)
+{
+    switch(attributeType)
+    {
+        case vertex_attribute_type_t::float32:
+            return 4u;
+        default:
+            DebugBreak();
+    }
+
+    UNREACHABLE_CODE();
+    return 0u;
+}
+
+uint32_t calculateVertexStrideSizeInBytes(const vertex_format_t* pVertexFormat)
+{
+    uint32_t strideSizeInBytes = 0u;
+    for(uint32_t attributeIndex = 0u; attributeIndex < pVertexFormat->vertexAttributeCount; ++attributeIndex)
+    {
+        strideSizeInBytes += pVertexFormat->pVertexAttributes[attributeIndex].count * getVertexAttributeTypeSizeInBytes(pVertexFormat->pVertexAttributes[attributeIndex].type);
+    }
+
+    return strideSizeInBytes;
+}
+
+void bindVertexBuffer(render_pass_t* pRenderPass, vertex_buffer_t* pVertexBuffer, const vertex_format_t* pVertexFormat, uint32_t slotIndex)
+{
+    D3D12_VERTEX_BUFFER_VIEW vertexBufferView = {};
+    vertexBufferView.BufferLocation = pVertexBuffer->bufferResource.pResource->GetGPUVirtualAddress();
+    vertexBufferView.SizeInBytes    = pVertexBuffer->sizeInBytes;
+    vertexBufferView.StrideInBytes  = calculateVertexStrideSizeInBytes(pVertexFormat);
+    pRenderPass->pGraphicsCommandList->IASetVertexBuffers(slotIndex, 1u, &vertexBufferView);
+}
+
 void clearColorRenderTarget(render_pass_t* pRenderPass, render_target_t* pRenderTarget, const float r, const float g, const float b, const float a)
 {
-    ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(pRenderTarget != nullptr);
     ASSERT_DEBUG(isColorRenderTarget(pRenderTarget));
+    ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(pRenderPass->isOpen);
 
     const FLOAT colorValues[4] = {r, g, b, a};
@@ -1485,6 +1796,7 @@ void executeRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderP
 
     if(pGraphicsFrame->pFirstRenderPassToExecute == nullptr)
     {
+        pRenderPass->pNext = pGraphicsFrame->pFirstRenderPassToExecute;
         pGraphicsFrame->pFirstRenderPassToExecute = pRenderPass;
     }
 
@@ -1499,45 +1811,21 @@ void executeRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderP
     }
 }
 
-template<typename T>
-T createInvalidResourceHandle()
-{
-    T handle = {invalidResourceHandleValue};
-    return handle;
-}
-
-template<typename T>
-T createResourceHandle(uint32_t resourceIndex)
-{
-    T handle = {resourceIndex};
-    return handle;
-}
-
-template<typename T>
-bool isInvalidResourceHandle(const T& resourceHandle)
-{
-    return resourceHandle.index == invalidResourceHandleValue;
-}
-
-vertex_buffer_handle_t createVertexBuffer(graphics_frame_t* pGraphicsFrame, const upload_buffer_handle_t& uploadBufferHandle)
+vertex_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame, const upload_buffer_t* pUploadBuffer, const uint32_t uploadBufferOffset = 0u, uint32_t sizeInBytes = 0u)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(!isInvalidResourceHandle(uploadBufferHandle));
-
-    const uint32_t newVertexBufferIndex = pGraphicsFrame->vertexBufferCount;
-    if((newVertexBufferIndex + 1) > pGraphicsFrame->maxVertexBufferCount)
-    {
-        return createInvalidResourceHandle<vertex_buffer_handle_t>();
-    }
+    ASSERT_DEBUG(pUploadBuffer != nullptr);
 
     vertex_buffer_t* pVertexBuffer = (vertex_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(vertex_buffer_t));
     if(pVertexBuffer == nullptr)
     {
-        return createInvalidResourceHandle<vertex_buffer_handle_t>();
+        return nullptr;
     }
 
-    upload_buffer_t* pUploadBuffer = pGraphicsFrame->ppUploadBuffers[uploadBufferHandle.index];
-    const uint64_t bufferSizeInBytes = pUploadBuffer->sizeInBytes - pUploadBuffer->startStagingBufferByteIndex;
+    if(sizeInBytes == 0u)
+    {
+        sizeInBytes = pUploadBuffer->sizeInBytes;
+    }
 
     D3D12_RESOURCE_DESC desc = {};
     desc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -1548,7 +1836,7 @@ vertex_buffer_handle_t createVertexBuffer(graphics_frame_t* pGraphicsFrame, cons
     desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     desc.SampleDesc.Count   = 1u;
     desc.SampleDesc.Quality = 0u;
-    desc.Width              = bufferSizeInBytes;
+    desc.Width              = sizeInBytes;
     
     D3D12_HEAP_PROPERTIES heapProperties = {};
     heapProperties.Type                 = D3D12_HEAP_TYPE_DEFAULT;
@@ -1558,138 +1846,22 @@ vertex_buffer_handle_t createVertexBuffer(graphics_frame_t* pGraphicsFrame, cons
     if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, IID_PPV_ARGS(&pVertexBuffer->bufferResource.pResource))) != S_OK)
     {
         freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pVertexBuffer);
-        return createInvalidResourceHandle<vertex_buffer_handle_t>();
+        return nullptr;
     }
 
     pVertexBuffer->bufferResource.currentState = D3D12_RESOURCE_STATE_COMMON;
+    pVertexBuffer->sizeInBytes = sizeInBytes;
 
     #if 1
     transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
-    pGraphicsFrame->pFrameGeneralGraphicsQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->pBufferResource->pResource, pUploadBuffer->startStagingBufferByteIndex, bufferSizeInBytes);
+    pGraphicsFrame->pFrameGeneralGraphicsQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->bufferResource.pResource, uploadBufferOffset, sizeInBytes);
     transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
     #else
     transitionResource(pGraphicsFrame->pFrameGeneralCopyQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
     pGraphicsFrame->pFrameGeneralCopyQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->pBufferResource->pResource, pUploadBuffer->startStagingBufferByteIndex, bufferSizeInBytes);
     #endif
 
-    pGraphicsFrame->vertexBufferCount++;
-    pGraphicsFrame->ppVertexBuffers[newVertexBufferIndex] = pVertexBuffer;
-    return createResourceHandle<vertex_buffer_handle_t>(newVertexBufferIndex);
-}
-
-bool createStagingBuffer(graphics_frame_t* pGraphicsFrame, const size_t minSizeInBytes, staging_buffer_t** pOutStagingBuffer)
-{
-    const uint64_t stagingBufferSizeInBytes = pGraphicsFrame->defaultStagingBufferSizeInBytes < minSizeInBytes ? minSizeInBytes : pGraphicsFrame->defaultStagingBufferSizeInBytes;
-
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Alignment          = 0u;
-    desc.Height             = 1u;
-    desc.DepthOrArraySize   = 1u;
-    desc.MipLevels          = 1u;
-    desc.SampleDesc.Count   = 1u;
-    desc.SampleDesc.Quality = 0u;
-    desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    desc.Width              = stagingBufferSizeInBytes;
-    
-    D3D12_HEAP_PROPERTIES heapProperties = {};
-    heapProperties.Type                 = D3D12_HEAP_TYPE_UPLOAD;
-    heapProperties.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    
-    staging_buffer_t* pStagingBuffer = (staging_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(staging_buffer_t));
-    if(pStagingBuffer == nullptr)
-    {
-        return false;
-    }
-
-    ID3D12Resource* pResource = nullptr;
-    if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, nullptr, IID_PPV_ARGS(&pResource))) != S_OK)
-    {
-        freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pStagingBuffer);
-        return false;
-    }
-
-    pStagingBuffer->capacityInBytes             = stagingBufferSizeInBytes;
-    pStagingBuffer->remainingSizeInBytes        = stagingBufferSizeInBytes;
-    pStagingBuffer->pNext                       = nullptr;
-    pStagingBuffer->bufferResource.currentState = D3D12_RESOURCE_STATE_GENERIC_READ;
-    pStagingBuffer->bufferResource.pResource    = pResource;
-
-    *pOutStagingBuffer = pStagingBuffer;
-    return true;
-}
-
-inline bool tryToFindStagingBufferWithEnoughCapacity(staging_buffer_t** pOutStagingBuffer, graphics_frame_t* pGraphicsFrame, const uint64_t dataSizeInBytes)
-{
-    staging_buffer_t* pStagingBuffer = pGraphicsFrame->pFirstStagingBuffer;
-    while(pStagingBuffer != nullptr)
-    {
-        if(pStagingBuffer->remainingSizeInBytes >= dataSizeInBytes)
-        {
-            *pOutStagingBuffer = pStagingBuffer;
-            return true;
-        }
-
-        pStagingBuffer = pStagingBuffer->pNext;
-    }
-
-    return false;
-}
-
-staging_buffer_t* getOrCreateStagingBufferToFitSize(graphics_frame_t* pGraphicsFrame, const uint64_t dataSizeInBytes)
-{
-    staging_buffer_t* pStagingBuffer = nullptr;
-    if(tryToFindStagingBufferWithEnoughCapacity(&pStagingBuffer, pGraphicsFrame, dataSizeInBytes))
-    {
-        return pStagingBuffer;
-    }
-
-    staging_buffer_t* pNextStagingBuffer = pGraphicsFrame->pFirstStagingBuffer;
-    staging_buffer_t* pNewStagingBuffer = nullptr;
-    if(!createStagingBuffer(pGraphicsFrame, dataSizeInBytes, &pNewStagingBuffer))
-    {
-        return nullptr;
-    }
-
-    if(pGraphicsFrame->pFirstStagingBuffer != nullptr)
-    {
-        pGraphicsFrame->pFirstStagingBuffer->pNext = pNextStagingBuffer;
-    }
-    pGraphicsFrame->pFirstStagingBuffer = pNewStagingBuffer;
-    return pNewStagingBuffer;
-}
-
-staging_buffer_slice_t allocateFromStagingBuffer(staging_buffer_t* pStagingBuffer, const uint64_t dataSizeInBytes)
-{
-    ASSERT_DEBUG(pStagingBuffer != nullptr);
-    ASSERT_DEBUG(dataSizeInBytes > 0u);
-
-    ASSERT_DEBUG(pStagingBuffer->remainingSizeInBytes >= dataSizeInBytes);
-
-    staging_buffer_slice_t slice = {};
-    slice.startByteIndex = pStagingBuffer->capacityInBytes - pStagingBuffer->remainingSizeInBytes;
-    slice.endByteIndex = slice.startByteIndex + dataSizeInBytes;
-
-    pStagingBuffer->remainingSizeInBytes -= dataSizeInBytes;
-
-    return slice;
-}
-
-void freeFromStagingBuffer(staging_buffer_t* pStagingBuffer, const staging_buffer_slice_t* pBufferSlice)
-{
-    ASSERT_DEBUG(pStagingBuffer != nullptr);
-    ASSERT_DEBUG(pBufferSlice != nullptr);
-    if(pBufferSlice->startByteIndex == pBufferSlice->endByteIndex) 
-    {
-        return;
-    }
-
-    ASSERT_DEBUG(pBufferSlice->endByteIndex > pBufferSlice->startByteIndex);
-    ASSERT_DEBUG(pBufferSlice->endByteIndex == (pStagingBuffer->capacityInBytes - pStagingBuffer->remainingSizeInBytes));
-    
-    const uint64_t sliceSizeInBytes = pBufferSlice->endByteIndex - pBufferSlice->startByteIndex;
-    pStagingBuffer->remainingSizeInBytes += sliceSizeInBytes;
+    return pVertexBuffer;
 }
 
 vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
@@ -1698,7 +1870,7 @@ vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vert
     ASSERT_DEBUG(pVertexAttributes != nullptr);
     ASSERT_DEBUG(vertexAttributeCount > 0u);
     
-    vertex_format_t* pVertexFormat = (vertex_format_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(vertex_format_t));
+    vertex_format_t* pVertexFormat = allocateVertexFormat(pGraphicsFrame->pRenderResourceCache);
     if(pVertexFormat == nullptr)
     {
         return nullptr;
@@ -1710,113 +1882,70 @@ vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vert
     return pVertexFormat;
 }
 
-upload_buffer_handle_t createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pData, const uint64_t dataSizeInBytes, upload_buffer_flags_t flags = upload_buffer_flag_none)
+upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pData, const uint32_t dataSizeInBytes, upload_buffer_flags_t flags = upload_buffer_flag_none)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(dataSizeInBytes > 0u);
 
-    const uint32_t newUploadBufferIndex = pGraphicsFrame->uploadBufferCount;
-    staging_buffer_t* pStagingBuffer = nullptr;
-    upload_buffer_t* pNewUploadBuffer = nullptr;
-    staging_buffer_slice_t stagingBufferRange = {};
-    D3D12_RANGE stagingBufferMapRange = {};
-    void* pStagingBufferData = nullptr;
-
-    if((newUploadBufferIndex+1) >= pGraphicsFrame->maxUploadBufferCount)
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment          = 0u;
+    desc.Height             = 1u;
+    desc.DepthOrArraySize   = 1u;
+    desc.MipLevels          = 1u;
+    desc.SampleDesc.Count   = 1u;
+    desc.SampleDesc.Quality = 0u;
+    desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Width              = dataSizeInBytes;
+    
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type                 = D3D12_HEAP_TYPE_UPLOAD;
+    heapProperties.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    
+    ID3D12Resource* pResource = nullptr;
+    if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, nullptr, IID_PPV_ARGS(&pResource))) != S_OK)
     {
-        goto cleanup_and_exit_failure;
+        return nullptr;
     }
 
-    pStagingBuffer = getOrCreateStagingBufferToFitSize(pGraphicsFrame, dataSizeInBytes);
-    if(pStagingBuffer == nullptr)
+    upload_buffer_t* pUploadBuffer = allocateUploadBuffer(pGraphicsFrame->pRenderResourceCache);
+    if(pUploadBuffer == nullptr)
     {
-        goto cleanup_and_exit_failure;
+        pResource->Release();
+        return nullptr;
     }
 
-    pNewUploadBuffer = (upload_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(upload_buffer_t));
-    if(pNewUploadBuffer == nullptr)
+    void* pUploadBufferData = nullptr;
+
+    D3D12_RANGE mapRange = {};
+    mapRange.End = dataSizeInBytes;
+    if(COM_CALL(pResource->Map(0, &mapRange, &pUploadBufferData)) != S_OK)
     {
-        goto cleanup_and_exit_failure;
-    }
-
-    stagingBufferRange = allocateFromStagingBuffer(pStagingBuffer, dataSizeInBytes);
-
-    stagingBufferMapRange.Begin = stagingBufferRange.startByteIndex;
-    stagingBufferMapRange.End   = stagingBufferRange.endByteIndex;
-
-    if(COM_CALL(pStagingBuffer->bufferResource.pResource->Map(0, &stagingBufferMapRange, &pStagingBufferData)) != S_OK)
-    {
-        goto cleanup_and_exit_failure;
+        pResource->Release();
+        freeUploadBuffer(pGraphicsFrame->pRenderResourceCache, pUploadBuffer);
+        return nullptr;
     }
 
     if(pData != nullptr)
     {
-        memcpy(pStagingBufferData, pData, dataSizeInBytes);
+        memcpy(pUploadBufferData, pData, dataSizeInBytes);
     }
 
-    pNewUploadBuffer->startStagingBufferByteIndex   = pStagingBuffer->capacityInBytes - pStagingBuffer->remainingSizeInBytes;
-    pNewUploadBuffer->sizeInBytes                   = dataSizeInBytes;
-    pNewUploadBuffer->pData                         = pStagingBufferData;
-    pNewUploadBuffer->pBufferResource               = &pStagingBuffer->bufferResource;
+    pUploadBuffer->sizeInBytes                  = dataSizeInBytes;
+    pUploadBuffer->pData                        = pUploadBufferData;
+    pUploadBuffer->bufferResource.pResource     = pResource;
+    pUploadBuffer->bufferResource.currentState  = D3D12_RESOURCE_STATE_GENERIC_READ;
 
-    pGraphicsFrame->ppUploadBuffers[newUploadBufferIndex] = pNewUploadBuffer;
-    pGraphicsFrame->uploadBufferCount++;
-
-    pStagingBuffer->remainingSizeInBytes -= dataSizeInBytes;
-    return createResourceHandle<upload_buffer_handle_t>(newUploadBufferIndex);
-
-cleanup_and_exit_failure:
-    freeFromStagingBuffer(pStagingBuffer, &stagingBufferRange);
-    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pNewUploadBuffer);
-    return createInvalidResourceHandle<upload_buffer_handle_t>();
+    pUploadBuffer->pNext = pGraphicsFrame->pFirstUploadBuffer;
+    pGraphicsFrame->pFirstUploadBuffer = pUploadBuffer;
+    
+    return pUploadBuffer;
 }
 
-upload_buffer_handle_t createUploadBuffer(graphics_frame_t* pGraphicsFrame, const uint64_t dataSizeInBytes)
+upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, const uint32_t dataSizeInBytes)
 {
     return createUploadBuffer(pGraphicsFrame, nullptr, dataSizeInBytes);
-}
-
-void renderFrame(HWND hwnd, graphics_frame_t* pGraphicsFrame)
-{
-    POINT cursorPos;
-    RECT clientRect;
-    GetCursorPos(&cursorPos);
-    GetClientRect(hwnd, &clientRect);
-
-    const float r = (float)cursorPos.x / (float)(clientRect.right - clientRect.left);
-    const float g = (float)cursorPos.y / (float)(clientRect.bottom - clientRect.top);
-
-    const FLOAT backBufferRGBA[4] = {r, g, 0.2f, 1.0f};
-
-    render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Clear Background");
-    clearColorRenderTarget(pRenderPass, pGraphicsFrame->pBackBuffer, r, g, 0.2f, 1.0f);
-    endRenderPass(pGraphicsFrame, pRenderPass);   
-
-    executeRenderPass(pGraphicsFrame, pRenderPass);
-}
-
-bool createSingleTriangleMesh(graphics_frame_t* pGraphicsFrame)
-{
-    const float triangleVertices[] = {
-        0.0f, 0.0f, 0.0f,
-        0.5f, 1.0f, 0.0f,
-        1.0f, 0.0f, 0.0f
-    };
-
-    //render_pass_t* pDrawRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle");
-    vertex_attribute_entry_t pVertexAttributes[] = {
-        {vertex_attribute_position, vertex_attribute_type_float, 3u}
-    };
-
-    vertex_format_t* pVertexFormat = createVertexFormat(pGraphicsFrame, pVertexAttributes, 1u);
-
-    upload_buffer_handle_t vertexBufferDataHandle = createUploadBuffer(pGraphicsFrame, (void*)triangleVertices, sizeof(triangleVertices));
-    ASSERT_DEBUG(!isInvalidResourceHandle(vertexBufferDataHandle));
-
-    vertex_buffer_handle_t triangleBufferHandle = createVertexBuffer(pGraphicsFrame, vertexBufferDataHandle);
-    ASSERT_DEBUG(!isInvalidResourceHandle(triangleBufferHandle));
-
-    return true;
 }
 
 struct shader_compilation_parameters_t
@@ -1830,7 +1959,7 @@ struct shader_compilation_parameters_t
 
 result_t<memory_buffer_t> readWholeFileIntoNewBuffer(memory_allocator_t* pAllocator, const char* pFilePath)
 {
-    FILE* pShaderFileHandle = fopen(pFilePath, "r");
+    FILE* pShaderFileHandle = fopen(pFilePath, "rb");
     if(pShaderFileHandle == nullptr)
     {
         return result_status_t::file_not_found;
@@ -1849,6 +1978,8 @@ result_t<memory_buffer_t> readWholeFileIntoNewBuffer(memory_allocator_t* pAlloca
 
     fread(pShaderSourceContent, 1u, shaderFileSizeInBytes, pShaderFileHandle);
     fclose(pShaderFileHandle);
+
+    pShaderSourceContent[shaderFileSizeInBytes] = 0;
 
     memory_buffer_t fileContent = {};
     fileContent.pData = pShaderSourceContent;
@@ -1879,20 +2010,20 @@ uint32_t findCharacterCountInString(const char* pString, const char needle)
 
 result_t<wchar_t*> formatWideStringIntoNewBuffer(memory_allocator_t* pAllocator, const wchar_t* pFormat, ...)
 {
-    wchar_t tempMemoryBuffer[1024];
-    const uint64_t tempMemoryBufferSizeInCharacters = sizeof(tempMemoryBuffer) << 1;
+    wchar_t tempMemoryBuffer[1024] = {};
+    const uint64_t tempMemoryBufferSizeInCharacters = sizeof(tempMemoryBuffer) >> 1;
     va_list vaList;
     va_start(vaList, pFormat);
     const uint32_t charactersPrinted = vswprintf_s(tempMemoryBuffer, tempMemoryBufferSizeInCharacters, pFormat, vaList);
     va_end(vaList);
 
-    wchar_t* pTextBuffer = (wchar_t*)allocateFromAllocator(pAllocator, charactersPrinted * sizeof(wchar_t));
+    wchar_t* pTextBuffer = (wchar_t*)allocateFromAllocator(pAllocator, charactersPrinted * sizeof(wchar_t), alloc_flag_clear_memory);
     if(pTextBuffer == nullptr)
     {
         return result_status_t::out_of_memory;
     }
 
-    memcpy(pTextBuffer, tempMemoryBuffer, charactersPrinted * sizeof(wchar_t));
+    wcscpy(pTextBuffer, tempMemoryBuffer);
     return pTextBuffer;
 }
 
@@ -1942,6 +2073,16 @@ T rangeCheckCast(size_t value)
     return (T)value;
 }
 
+void freeCompilerArguments(memory_allocator_t* pMemoryAllocator, dxc_arguments_t* pArguments)
+{
+    for(uint32_t argumentIndex = 0u; argumentIndex < pArguments->argumentCount; ++argumentIndex)
+    {
+        freeFromAllocator(pMemoryAllocator, (void*)pArguments->ppArguments[argumentIndex]);
+    }
+
+    freeFromAllocator(pMemoryAllocator, pArguments->ppArguments);
+}
+
 result_t<dxc_arguments_t> generateCompilerArgumentsIntoNewBuffer(memory_allocator_t* pMemoryAllocator, const shader_compilation_parameters_t* pParameters)
 {
     uint32_t argumentCount = 2u; //entry point + shader profile
@@ -1965,30 +2106,33 @@ result_t<dxc_arguments_t> generateCompilerArgumentsIntoNewBuffer(memory_allocato
         return result_status_t::out_of_memory;
     }
 
-    const char* pDefineStart    = pParameters->pDefines;
-    const char* pDefineEnd      = pParameters->pDefines + strlen(pParameters->pDefines);
+    ppArguments[0] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-E %hs", pParameters->pEntryPoint);
+    ppArguments[1] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-T %hs", pParameters->pShaderProfile);
 
-    const char* pCurrentDefineStart = pDefineStart;
-
-    ppArguments[0] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-E %s", pParameters->pEntryPoint);
-    ppArguments[1] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-T %s", pParameters->pShaderProfile);
-
-    if(ppArguments[0] == nullptr || ppArguments[1] == nullptr)
+    if(pParameters->pDefines != nullptr)
     {
-        goto cleanup_and_return_out_of_memory;
-        return result_status_t::out_of_memory;
-    }
-    
-    for(uint32_t argumentIndex = 2u; argumentIndex < argumentCount; ++argumentIndex)
-    {
-        const char* pCurrentDefineEnd = findFirstInstanceOfCharacterInString(pCurrentDefineStart, ';');
-        const int defineLength = rangeCheckCast<int>(pCurrentDefineEnd - pCurrentDefineStart);
-        ppArguments[argumentIndex] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-D %.*s", defineLength, pCurrentDefineStart);
-        if(ppArguments[argumentIndex] == nullptr)
+        const char* pDefineStart    = pParameters->pDefines;
+        const char* pDefineEnd      = pParameters->pDefines + strlen(pParameters->pDefines);
+
+        const char* pCurrentDefineStart = pDefineStart;
+
+        if(ppArguments[0] == nullptr || ppArguments[1] == nullptr)
         {
             goto cleanup_and_return_out_of_memory;
+            return result_status_t::out_of_memory;
         }
-        pCurrentDefineStart = pCurrentDefineEnd + 1;
+        
+        for(uint32_t argumentIndex = 2u; argumentIndex < argumentCount; ++argumentIndex)
+        {
+            const char* pCurrentDefineEnd = findFirstInstanceOfCharacterInString(pCurrentDefineStart, ';');
+            const int defineLength = rangeCheckCast<int>(pCurrentDefineEnd - pCurrentDefineStart);
+            ppArguments[argumentIndex] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-D %.*s", defineLength, pCurrentDefineStart);
+            if(ppArguments[argumentIndex] == nullptr)
+            {
+                goto cleanup_and_return_out_of_memory;
+            }
+            pCurrentDefineStart = pCurrentDefineEnd + 1;
+        }
     }
 
     arguments.argumentCount = argumentCount;
@@ -2005,77 +2149,117 @@ cleanup_and_return_out_of_memory:
     return result_status_t::out_of_memory;
 }
 
-result_t<shader_binary_t*> loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const shader_compilation_parameters_t* pParameters)
+void destroyShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pShaderBinary)
 {
-    result_t<memory_buffer_t> shaderCode = readWholeFileIntoNewBuffer(pGraphicsFrame->pTempMemoryAllocator, pParameters->pShaderSourceCode);
-    if(!isResultSuccessful(shaderCode))
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pShaderBinary != nullptr);
+
+    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, (void*)pShaderBinary->pShaderBlob);
+    freeShaderBinary(pGraphicsFrame, pShaderBinary);
+}
+
+shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const shader_compilation_parameters_t* pParameters)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pParameters != nullptr);
+    ASSERT_DEBUG(pParameters->pEntryPoint != nullptr)
+    ASSERT_DEBUG(pParameters->pFilePath != nullptr);
+    ASSERT_DEBUG(pParameters->pShaderProfile != nullptr);
+    result_t<memory_buffer_t> shaderCodeResult = readWholeFileIntoNewBuffer(&pGraphicsFrame->tempMemoryAllocator, pParameters->pFilePath);
+    if(!isResultSuccessful(shaderCodeResult))
     {
-        return shaderCode.status;
+        logError("Could not read shader file '%s' - error: %s.", pParameters->pFilePath, getResultString(shaderCodeResult));
+        return nullptr;
     }
 
     DxcBuffer shaderSourceBuffer = {};
-    shaderSourceBuffer.Ptr = shaderCode.value.pData;
-    shaderSourceBuffer.Size = shaderCode.value.sizeInBytes;
+    shaderSourceBuffer.Ptr = shaderCodeResult.value.pData;
+    shaderSourceBuffer.Size = shaderCodeResult.value.sizeInBytes;
 
-    result_t<dxc_arguments_t> compileArguments = generateCompilerArgumentsIntoNewBuffer(pGraphicsFrame->pTempMemoryAllocator, pParameters);
-    if(!isResultSuccessful(compileArguments))
+    result_t<dxc_arguments_t> compileArgumentsResult = generateCompilerArgumentsIntoNewBuffer(&pGraphicsFrame->tempMemoryAllocator, pParameters);
+    if(!isResultSuccessful(compileArgumentsResult))
     {
-        return compileArguments.status;
+        logError("Could not generate compiler arguments for shader file '%s' - error: %s.", pParameters->pFilePath, getResultString(compileArgumentsResult));
+        return nullptr;
     }
 
     IDxcResult* pCompileResult = nullptr;
 
     shader_compiler_context_t* pShaderCompilerContext = pGraphicsFrame->pShaderCompilerContext;
-    if(COM_CALL(pShaderCompilerContext->pShaderCompiler->Compile(&shaderSourceBuffer, compileArguments.value.ppArguments, compileArguments.value.argumentCount, pShaderCompilerContext->pIncludeHandler, IID_PPV_ARGS(&pCompileResult))) != S_OK)
+    const HRESULT compileResult = COM_CALL(pShaderCompilerContext->pShaderCompiler->Compile(&shaderSourceBuffer, compileArgumentsResult.value.ppArguments, compileArgumentsResult.value.argumentCount, pShaderCompilerContext->pIncludeHandler, IID_PPV_ARGS(&pCompileResult)));
+    
+    freeCompilerArguments(&pGraphicsFrame->tempMemoryAllocator, &compileArgumentsResult.value);
+    freeFromAllocator(&pGraphicsFrame->tempMemoryAllocator, shaderCodeResult.value.pData);
+    
+    if(compileResult != S_OK)
     {
-        logError("Shader compiler couldn't compile shader '%s'.", pParameters->pFilePath);
-        return result_status_t::internal_error;
+        logError("Shader compiler couldn't compile shader '%s' - error: %s.", pParameters->pFilePath, getHResultString(compileResult));
+        return nullptr;
     }
 
     if(pCompileResult->HasOutput(DXC_OUT_ERRORS))
     {
-        IDxcBlobEncoding* pBlobEncoding = nullptr;
-        if(COM_CALL(pCompileResult->GetErrorBuffer(&pBlobEncoding)) != S_OK)
+        IDxcBlobEncoding* pErrorBufferEncoding = nullptr;
+        const HRESULT getErrorBufferResult = COM_CALL(pCompileResult->GetErrorBuffer(&pErrorBufferEncoding));
+        if(getErrorBufferResult != S_OK)
         {
-            logError("Shader compilation of shader '%s' failed but the error couldn't get retrieved.", pParameters->pFilePath);
+            logError("Shader compilation of shader '%s' failed but the error couldn't get retrieved - error: %s.", pParameters->pFilePath, getHResultString(getErrorBufferResult));
             pCompileResult->Release();
-            return result_status_t::internal_error;
+            return nullptr;
         }
 
-        if(pBlobEncoding != nullptr && pBlobEncoding->GetBufferSize() > 0)
+        if(pErrorBufferEncoding != nullptr && pErrorBufferEncoding->GetBufferSize() > 0)
         {
-            logError("Shader compilation of shader '%s' failed because: %s\n", pParameters->pFilePath, (char*)pBlobEncoding->GetBufferPointer());
-            pBlobEncoding->Release();
+            logError("Shader compilation of shader '%s' failed because: %s\n", pParameters->pFilePath, (char*)pErrorBufferEncoding->GetBufferPointer());
+            pErrorBufferEncoding->Release();
             pCompileResult->Release();
-            return result_status_t::compilation_error;
+            return nullptr;
         }
     }
-    
-}
 
-bool createMesh(graphics_frame_t* pGraphicsFrame)
-{
-    shader_compilation_parameters_t parameters = {};
-    parameters.pFilePath    = "test.hlsl";
-    parameters.pEntryPoint  = "main";
-    parameters.pDefines     = "D;BLA;RIBBID";
-    shader_binary_t* pVertexShaderBinary = loadAndCompileShaderCodeFromFile(pGraphicsFrame, &parameters);
+    IDxcBlob* pCompileShaderBlob = nullptr;
+    const HRESULT getBlobOutputResult = COM_CALL(pCompileResult->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pCompileShaderBlob), nullptr));
+    pCompileResult->Release();
 
-    return createSingleTriangleMesh(pGraphicsFrame);
-}   
-
-void doFrame(HWND hwnd, render_context_t* pRenderContext)
-{
-    static bool meshCreated = false;
-    graphics_frame_t* pFrame = beginNextFrame(pRenderContext);
-    
-    if(!meshCreated && createMesh(pFrame))
+    if(getBlobOutputResult != S_OK)
     {
-        meshCreated = true;
+        pCompileShaderBlob->Release();
+        logError("Shader compilation of shader '%s' was successful but there's no shader blob. GetOutput() error: %s", pParameters->pFilePath, getHResultString(getBlobOutputResult));
+        return nullptr;
     }
 
-    renderFrame(hwnd, pFrame);
-    finishFrame(pRenderContext, pFrame);
+#if 0
+    ID3D12ShaderReflection* pShaderReflection = nullptr;
+    const HRESULT shaderReflectionResult = D3DReflect(pCompileShaderBlob->GetBufferPointer(), pCompileShaderBlob->GetBufferSize(), IID_PPV_ARGS(&pShaderReflection));
+    if(shaderReflectionResult != S_OK)
+    {
+        pCompileShaderBlob->Release();
+        logError("Could not reflect shader '%s' - %s", pParameters->pFilePath, getHResultString(shaderReflectionResult));
+        return nullptr;
+    }
+#endif
+    const uint32_t shaderBlobSizeInBytes = rangeCheckCast<uint32_t>(pCompileShaderBlob->GetBufferSize());
+    uint8_t* pShaderBlobCopy = (uint8_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, pCompileShaderBlob->GetBufferSize());
+    if(pShaderBlobCopy == nullptr)
+    {
+        logError("Shader compilation of shader '%s' was successful but we ran out of memory trying to copy the shader blob.", pParameters->pFilePath);
+        pCompileShaderBlob->Release();
+        return nullptr;
+    }
+
+    memcpy(pShaderBlobCopy, pCompileShaderBlob->GetBufferPointer(), pCompileShaderBlob->GetBufferSize());
+    pCompileShaderBlob->Release();
+
+    shader_binary_t* pShaderBinary = allocateShaderBinary(pGraphicsFrame->pRenderResourceCache);
+    if(pShaderBinary == nullptr)
+    {
+        return nullptr;
+    }
+
+    pShaderBinary->pShaderBlob = pShaderBlobCopy;
+    pShaderBinary->shaderBlobSizeInBytes = shaderBlobSizeInBytes;
+
+    return pShaderBinary;
 }
 
 void destroyFence(ID3D12Fence* pFence)
@@ -2101,79 +2285,52 @@ void shutdownRenderContext(render_context_t* pRenderContext)
     clearMemoryWithZeroes(pRenderContext);
 }
 
+void resizeBackBuffer(render_context_t* pRenderContext, const uint32_t width, const uint32_t height)
+{
+    flushAllFrames(pRenderContext);
+
+    for(uint32_t bufferIndex = 0u; bufferIndex < pRenderContext->swapChain.backBufferCount; ++bufferIndex)
+    {
+        destroyRenderTarget(&pRenderContext->swapChain.pBackBuffers[bufferIndex]);
+    }
+
+    pRenderContext->swapChain.pSwapChain->ResizeBuffers(0u, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+
+    resetDescriptorHeap(&pRenderContext->swapChain.backBufferRenderTargetDescriptorHeap);
+
+    for(uint32_t bufferIndex = 0u; bufferIndex < pRenderContext->swapChain.backBufferCount; ++bufferIndex)
+    {
+        ID3D12Resource* pFrameBuffer = nullptr;
+        COM_CALL(pRenderContext->swapChain.pSwapChain->GetBuffer(bufferIndex, IID_PPV_ARGS(&pFrameBuffer)));
+
+        D3D12_CPU_DESCRIPTOR_HANDLE descriptorHandle = getNextCPUDescriptorHandle(&pRenderContext->swapChain.backBufferRenderTargetDescriptorHeap);
+        pRenderContext->pDevice->CreateRenderTargetView(pFrameBuffer, nullptr, descriptorHandle);
+
+        initializeRenderTarget(&pRenderContext->swapChain.pBackBuffers[bufferIndex], pFrameBuffer, &descriptorHandle, D3D12_RESOURCE_STATE_PRESENT);
+    }
+}
+
 render_context_parameters_t createDefaultRenderContextParameters(HWND pWindowHandle, const uint32_t frameBufferCount, const uint32_t windowWidth, const uint32_t windowHeight, const bool useDebugLayer)
 {
     render_context_parameters_t parameters = {};
-    parameters.frameBufferCount = frameBufferCount;
-    parameters.useDebugLayer = useDebugLayer;
-    parameters.windowHeight = windowHeight;
-    parameters.windowWidth = windowWidth;
-    parameters.pWindowHandle = pWindowHandle;
+
+    if(useDebugLayer)
+    {
+        parameters.flags = render_context_flags_t::use_debug_layer;
+    }
+
+    parameters.frameBufferCount                         = frameBufferCount;
+    parameters.windowHeight                             = windowHeight;
+    parameters.windowWidth                              = windowWidth;
+    parameters.pWindowHandle                            = pWindowHandle;
     parameters.limits.maxUploadBufferCount              = 32u;
     parameters.limits.maxVertexBufferCount              = 32u;
     parameters.limits.maxRenderPassCount                = 32u;
+    parameters.limits.maxPipelineStateCount             = 32u;
+    parameters.limits.maxRenderTargetCount              = 32u;
+    parameters.limits.maxShaderBinaryCount              = 32u;
+    parameters.limits.maxVertexFormatCount              = 32u;
     parameters.limits.defaultStagingBufferSizeInBytes   = 4096u;
 
     return parameters;
-}
-
-bool setup(render_context_t* pRenderContext, HWND pWindowHandle, const uint32_t windowWidth, const uint32_t windowHeight, bool useDebugLayer)
-{
-    const uint32_t frameBufferCount = 3u;
-    const render_context_parameters_t parameters = createDefaultRenderContextParameters(pWindowHandle, frameBufferCount, windowWidth, windowHeight, useDebugLayer);
-    if(!initializeRenderContext(pRenderContext, &parameters))
-    {
-        return false;
-    }
-
-    SetWindowLongPtrA(pWindowHandle, GWLP_USERDATA, (LONG_PTR)pRenderContext);
-    return true;
-}
-
-int CALLBACK WinMain(HINSTANCE hInstance,
-	HINSTANCE hPrevInstance,
-	LPSTR lpCmdLine, int nShowCmd)
-{
-	LARGE_INTEGER performanceFrequency;
-	QueryPerformanceFrequency(&performanceFrequency);
-
-    uint32_t windowWidth = 1024;
-    uint32_t windowHeight = 768;
-    HWND hwnd = setupWindow(hInstance, windowWidth, windowHeight);
-
-	if (hwnd == INVALID_HANDLE_VALUE)
-		return -1;
-
-    render_context_t renderContext = {};
-    const bool useDebugLayer = true;
-
-    RECT windowRect = {};
-    GetClientRect(hwnd, &windowRect);
-    windowWidth = windowRect.right - windowRect.left;
-    windowHeight = windowRect.bottom - windowRect.top;
-	if(!setup(&renderContext, hwnd, windowWidth, windowHeight, useDebugLayer))
-    {
-        shutdownRenderContext(&renderContext);
-        return -1;
-    }
-
-	bool loopRunning = true;
-	MSG msg = {0};
-
-	while (loopRunning)
-	{
-		while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE) > 0)
-		{
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-
-			if (msg.message == WM_QUIT)
-				loopRunning = false;
-		}
-
-		doFrame(hwnd, &renderContext);
-	}
-
-    shutdownRenderContext(&renderContext);
-	return 0;
 }
