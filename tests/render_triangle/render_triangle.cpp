@@ -12,6 +12,7 @@ mesh_t* createMesh(graphics_frame_t* pGraphicsFrame, const float* pVertices, con
 
     mesh_t* pMesh = (mesh_t*)allocateFromDefaultAllocator(nullptr, sizeof(mesh_t), defaultAllocationAlignment);
     pMesh->vertexCount = vertexCount;
+    pMesh->vertexOffset = 0u;
     pMesh->pVertexFormat = pVertexFormat;
     pMesh->pVertexBuffer = pMeshVertexBuffer;
 
@@ -82,17 +83,18 @@ graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphi
         return nullptr;
     }
 
-/*
-    LPCSTR SemanticName;
-    UINT SemanticIndex;
-    DXGI_FORMAT Format;
-    UINT InputSlot;
-    UINT AlignedByteOffset;
-    D3D12_INPUT_CLASSIFICATION InputSlotClass;
-    UINT InstanceDataStepRate;*/
+    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ID3DBlob* pRootSignatureBlob = nullptr;
+    ID3DBlob* pErrorBlob = nullptr;
+    D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &pRootSignatureBlob, &pErrorBlob);
+    ID3D12RootSignature* pRootSignature = nullptr;
+    pGraphicsFrame->pDevice->CreateRootSignature(0u, pRootSignatureBlob->GetBufferPointer(), pRootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&pRootSignature));
 
     D3D12_INPUT_ELEMENT_DESC elementDescs[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPipelineStateDesc = {};
@@ -100,15 +102,18 @@ graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphi
     graphicsPipelineStateDesc.VS.pShaderBytecode    = pPipelineStateParameters->pVertexShader->pShaderBlob;
     graphicsPipelineStateDesc.PS.BytecodeLength     = pPipelineStateParameters->pPixelShader->shaderBlobSizeInBytes;
     graphicsPipelineStateDesc.PS.pShaderBytecode    = pPipelineStateParameters->pPixelShader->pShaderBlob;
-    graphicsPipelineStateDesc.NumRenderTargets      = 0u;
+    graphicsPipelineStateDesc.NumRenderTargets      = 1u;
+    graphicsPipelineStateDesc.SampleMask            = 0xFFFFFFFF;
+    graphicsPipelineStateDesc.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
     graphicsPipelineStateDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     graphicsPipelineStateDesc.SampleDesc.Count      = 1u;
     graphicsPipelineStateDesc.SampleDesc.Quality    = 0u;
     graphicsPipelineStateDesc.BlendState            = createDefaultBlendDesc();
     graphicsPipelineStateDesc.DepthStencilState     = createDefaultDepthStencilDesc();
     graphicsPipelineStateDesc.RasterizerState       = createDefaultRasterizerDesc();
-
-    graphicsPipelineStateDesc.InputLayout.NumElements = 1;
+    graphicsPipelineStateDesc.pRootSignature        = pRootSignature;
+    
+    graphicsPipelineStateDesc.InputLayout.NumElements = 2;
     graphicsPipelineStateDesc.InputLayout.pInputElementDescs = elementDescs;
 
     ID3D12PipelineState* pPipelineStateObject = nullptr;
@@ -122,6 +127,7 @@ graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphi
     setD3D12ObjectDebugName(pPipelineStateObject, pPipelineStateParameters->pName);
     
     pPipelineState->pPipelineState = pPipelineStateObject;
+    pPipelineState->pRootSignature = pRootSignature;
     return pPipelineState;
 }
 
@@ -131,6 +137,7 @@ material_t* createMaterial(graphics_frame_t* pGraphicsFrame, vertex_format_t* pV
     pipelineStateParameters.pVertexShader   = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pVertexShaderParameters);
     pipelineStateParameters.pPixelShader    = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pPixelShaderParameters);
     pipelineStateParameters.pVertexFormat   = pVertexFormat;
+    pipelineStateParameters.pName           = "Test";
 
     graphics_pipeline_state_t* pDefaultPipelineStateObject = createGraphicsPipelineState(pGraphicsFrame, &pipelineStateParameters);
     material_t* pMaterial = (material_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(material_t));
@@ -141,17 +148,21 @@ material_t* createMaterial(graphics_frame_t* pGraphicsFrame, vertex_format_t* pV
 mesh_t* createSingleTriangleMesh(graphics_frame_t* pGraphicsFrame)
 {
     const float triangleVertices[] = {
-        0.0f, 0.0f, 0.0f,
-        0.5f, 1.0f, 0.0f,
-        1.0f, 0.0f, 0.0f
+        0.0f, 0.0f, 0.5f,
+        1.0f, 0.0f, 0.0f, 1.0f,
+        0.5f, 1.0f, 0.5f,
+        0.0f, 1.0f, 0.0f, 1.0f,
+        1.0f, 0.0f, 0.5f,
+        0.0f, 0.0f, 1.0f, 1.0f
     };
 
     //render_pass_t* pDrawRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle");
     vertex_attribute_entry_t pVertexAttributes[] = {
-        {vertex_attribute_t::position, vertex_attribute_type_t::float32, 3u}
+        {vertex_attribute_t::position, vertex_attribute_type_t::float32, 3u},
+        {vertex_attribute_t::color, vertex_attribute_type_t::float32, 4u}
     };
 
-    vertex_format_t* pVertexFormat = createVertexFormat(pGraphicsFrame, pVertexAttributes, 1u);
+    vertex_format_t* pVertexFormat = createVertexFormat(pGraphicsFrame, pVertexAttributes, 2u);
 
     return createMesh(pGraphicsFrame, triangleVertices, 3u, pVertexFormat);
 }
@@ -172,15 +183,15 @@ void renderFrame(HWND hwnd, graphics_frame_t* pGraphicsFrame)
     ps_para.pFilePath = "pixel_shader.hlsl";
     ps_para.pShaderProfile = "ps_6_0";
 
-    mesh_t* pMesh = createSingleTriangleMesh(pGraphicsFrame);
-    material_t* pMaterial = createMaterial(pGraphicsFrame, pMesh->pVertexFormat, &vs_para, &ps_para);
+    static mesh_t* pMesh = createSingleTriangleMesh(pGraphicsFrame);
+    static material_t* pMaterial = createMaterial(pGraphicsFrame, pMesh->pVertexFormat, &vs_para, &ps_para);
 
     const float r = (float)cursorPos.x / (float)(clientRect.right - clientRect.left);
     const float g = (float)cursorPos.y / (float)(clientRect.bottom - clientRect.top);
 
     const FLOAT backBufferRGBA[4] = {r, g, 0.2f, 1.0f};
 
-    render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle");
+    render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Draw Triangle", pGraphicsFrame->pBackBuffer);
     clearColorRenderTarget(pRenderPass, pGraphicsFrame->pBackBuffer, r, g, 0.2f, 1.0f);
     drawMesh(pMesh, pMaterial, pRenderPass);
     endRenderPass(pGraphicsFrame, pRenderPass);   

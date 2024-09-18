@@ -22,7 +22,27 @@ struct mesh_t
 
 void bindGraphicsPipelineState(render_pass_t* pRenderPass, graphics_pipeline_state_t* pGraphicsPipelineState)
 {
+	D3D12_VIEWPORT viewport = {};
+	viewport.Height = (float)768;
+	viewport.Width = (float)1024;
+    viewport.TopLeftX = 0.0f;
+    viewport.TopLeftY = 0.0f;
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+
+    D3D12_RECT scissorRect = {};
+    scissorRect.bottom = 768;
+    scissorRect.right = 1024;
+    scissorRect.left = 0;
+    scissorRect.top = 0;
+
+    pRenderPass->pGraphicsCommandList->RSSetViewports(1u, &viewport);
+    pRenderPass->pGraphicsCommandList->RSSetScissorRects(1u, &scissorRect);
+
     pRenderPass->pGraphicsCommandList->SetPipelineState(pGraphicsPipelineState->pPipelineState);
+	pRenderPass->pGraphicsCommandList->SetGraphicsRootSignature(pGraphicsPipelineState->pRootSignature);
+	pRenderPass->pGraphicsCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	pRenderPass->pGraphicsCommandList->OMSetRenderTargets(1u, &pRenderPass->pRenderTarget->cpuDescriptorHandle, 0u, nullptr);
 }
 
 void draw(render_pass_t* pRenderPass, const uint32_t vertexOffset, const uint32_t vertexCount)

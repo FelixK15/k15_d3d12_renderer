@@ -292,8 +292,9 @@ struct d3d12_swap_chain_t
     render_target_t*                pBackBuffers;
     DXGISwapChainType*              pSwapChain;
     D3D12_CPU_DESCRIPTOR_HANDLE*    pBackBufferRenderTargetHandles;
+    uint32_t                        width;
+    uint32_t                        height;
     uint8_t                         backBufferCount;
-
 };
 
 struct render_pass_t
@@ -302,12 +303,14 @@ struct render_pass_t
     ID3D12GraphicsCommandList*  pGraphicsCommandList;
     const char*                 pName;
     bool                        isOpen;
+    render_target_t*            pRenderTarget;
     render_pass_t*              pNext;
 };
 
 struct graphics_pipeline_state_t
 {
     ID3D12PipelineState* pPipelineState;
+    ID3D12RootSignature* pRootSignature;
 };
 
 enum upload_buffer_flags_t : uint8_t
@@ -325,7 +328,8 @@ struct upload_buffer_t
 
 enum vertex_attribute_t : uint8_t
 {
-    position
+    position,
+    color
 };
 
 enum vertex_attribute_type_t : uint8_t
@@ -779,6 +783,19 @@ D3D12_CPU_DESCRIPTOR_HANDLE getNextCPUDescriptorHandle(d3d12_descriptor_heap_t* 
     return cpuHandle;
 }
 
+void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, render_pass_t* pFirstRenderPassInChain)
+{
+    render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
+    while(pCurrentRenderPass != nullptr)
+    {
+        render_pass_t* pNextRenderPass = pCurrentRenderPass->pNext;
+        pCurrentRenderPass->pNext = pRenderResourceCache->pFirstFreeRenderPass;
+        pRenderResourceCache->pFirstFreeRenderPass = pCurrentRenderPass;
+
+        pCurrentRenderPass = pNextRenderPass;
+    }
+}
+
 void flushFrame(graphics_frame_t* pGraphicsFrame)
 {
     const DWORD waitResult = WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
@@ -789,6 +806,10 @@ void resetFrame(graphics_frame_t* pGraphicsFrame)
 {
     COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator->Reset());
     COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsQueue->Reset(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator, nullptr));
+
+    markRenderPassChainAsFree(pGraphicsFrame->pRenderResourceCache, pGraphicsFrame->pFirstRenderPassToExecute);
+    pGraphicsFrame->pFirstRenderPassToExecute = nullptr;
+    pGraphicsFrame->pLastRenderPassToExecute = nullptr;
 }
 
 graphics_frame_t* getGraphicsFrameFromGraphicsFrameCollection(graphics_frame_collection_t* pGraphicsFrameCollection, const uint64_t frameIndex)
@@ -1010,6 +1031,9 @@ bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pMem
         initializeRenderTarget(&swapChain.pBackBuffers[bufferIndex], pFrameBuffer, &descriptorHandle, D3D12_RESOURCE_STATE_PRESENT);
     }
     
+    swapChain.width = windowWidth;
+    swapChain.height = windowHeight;
+
     *pOutSwapChain = swapChain;
     return true;
 
@@ -1594,19 +1618,6 @@ graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
     return pGraphicsFrame;
 }
 
-void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, render_pass_t* pFirstRenderPassInChain)
-{
-    render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
-    while(pCurrentRenderPass != nullptr)
-    {
-        render_pass_t* pNextRenderPass = pCurrentRenderPass->pNext;
-        pCurrentRenderPass->pNext = pRenderResourceCache->pFirstFreeRenderPass;
-        pRenderResourceCache->pFirstFreeRenderPass = pCurrentRenderPass;
-
-        pCurrentRenderPass = pNextRenderPass;
-    }
-}
-
 void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFrame)
 {
     ASSERT_DEBUG(pRenderContext != nullptr);
@@ -1627,12 +1638,7 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
         pRenderPass = pRenderPass->pNext;
     }
 
-    markRenderPassChainAsFree(pGraphicsFrame->pRenderResourceCache, pGraphicsFrame->pFirstRenderPassToExecute);
-
     COM_CALL(pRenderContext->pDefaultDirectCommandQueue->Signal(pGraphicsFrame->pFrameFence, pGraphicsFrame->frameIndex));
-    
-    pGraphicsFrame->pFirstRenderPassToExecute = nullptr;
-    pGraphicsFrame->pLastRenderPassToExecute = nullptr;
 
     COM_CALL(pRenderContext->swapChain.pSwapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
     COM_CALL(pGraphicsFrame->pFrameFence->SetEventOnCompletion(pGraphicsFrame->frameIndex, pGraphicsFrame->pFrameFinishedEvent));
@@ -1697,7 +1703,7 @@ upload_buffer_t* allocateUploadBuffer(render_resource_cache_t* pRenderResourceCa
     return (upload_buffer_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->uploadBuffers, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "upload buffers");
 }
 
-render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRenderPassName)
+render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRenderPassName, render_target_t* pRenderTarget)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
 
@@ -1713,6 +1719,7 @@ render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRe
     COM_CALL(pRenderPass->pGraphicsCommandList->Reset(pRenderPass->pGraphicsCommandAllocator, nullptr));
     pRenderPass->isOpen = true;
     pRenderPass->pName = pRenderPassName;
+    pRenderPass->pRenderTarget = pRenderTarget;
 
     setD3D12ObjectDebugName(pRenderPass->pGraphicsCommandList, pRenderPassName);    
     addBeginMarker(pRenderPass->pGraphicsCommandList, pRenderPassName);
@@ -2295,6 +2302,8 @@ void resizeBackBuffer(render_context_t* pRenderContext, const uint32_t width, co
     }
 
     pRenderContext->swapChain.pSwapChain->ResizeBuffers(0u, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+    pRenderContext->swapChain.width = width;
+    pRenderContext->swapChain.height = height;
 
     resetDescriptorHeap(&pRenderContext->swapChain.backBufferRenderTargetDescriptorHeap);
 
