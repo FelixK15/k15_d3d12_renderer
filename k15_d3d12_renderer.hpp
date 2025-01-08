@@ -87,6 +87,12 @@ typedef ID3D12Debug6    D3D12DebugType;
 typedef IDXGIFactory7   DXGIFactoryType;
 typedef IDXGISwapChain4 DXGISwapChainType;
 
+typedef uint32_t hash32_t;
+
+constexpr uint64_t  maxVertexAttributeCount     = 16u;
+constexpr uint64_t  defaultAllocationAlignment  = 16u;
+constexpr uint32_t  invalidResourceHandleValue  = ~0u;
+
 enum pipeline_stream_field_flags_t : uint16_t
 {
     vs = 0x01,
@@ -326,27 +332,38 @@ struct upload_buffer_t
     upload_buffer_t*    pNext;
 };
 
-enum vertex_attribute_t : uint8_t
+enum class vertex_attribute_t : uint8_t
 {
     position,
-    color
+    color,
+    count
 };
 
-enum vertex_attribute_type_t : uint8_t
+enum class vertex_attribute_type_t : uint8_t
 {
-    float32
+    float32,
+    count
+};
+
+enum class vertex_attribute_frequency_t : uint8_t
+{
+    vertex = 0,
+    instance,
+    count
 };
 
 struct vertex_attribute_entry_t
 {
-    vertex_attribute_t      attribute;
-    vertex_attribute_type_t type;
-    uint32_t                count;
+    vertex_attribute_t              attribute;
+    vertex_attribute_type_t         type;
+    vertex_attribute_frequency_t    frequency;
+    uint32_t                        offsetInBytes;
+    uint32_t                        count;
 };
 
 struct vertex_format_t
 {
-    vertex_attribute_entry_t    pVertexAttributes[12];
+    vertex_attribute_entry_t    pVertexAttributes[maxVertexAttributeCount];
     uint32_t                    vertexAttributeCount;
 };
 
@@ -388,6 +405,31 @@ struct base_dynamic_array_t
 };
 
 template<typename T>
+struct hash_map_node_t
+{
+    hash32_t    hash;
+    void*       pNext;
+    T           value;
+};
+
+template<typename T>
+struct hash_map_t
+{
+    memory_allocator_t*  pMemoryAllocator;
+    hash_map_node_t<T>** ppBaseNodes;
+    hash_map_node_t<T>*  pFreeNodes;
+    uint32_t             count;
+    uint32_t             capacity;
+};
+
+template<typename T>
+struct hash_map_entry_t
+{
+    T value;
+    bool isNew;
+};
+
+template<typename T>
 struct auto_resource_t
 {
     T operator()
@@ -411,18 +453,19 @@ enum render_resource_flags_t : uint8_t
 
 struct render_resource_cache_t
 {
-    memory_allocator_t*                 pMemoryAllocator;
-    dynamic_array_t<vertex_buffer_t>    vertexBuffers;
-    dynamic_array_t<render_pass_t>      renderPasses;
-    dynamic_array_t<render_target_t>    renderTargets;
-    dynamic_array_t<vertex_format_t>    vertexFormats;
-    dynamic_array_t<graphics_pipeline_state_t>   pipelineStates;
-    dynamic_array_t<upload_buffer_t>    uploadBuffers;
-    dynamic_array_t<shader_binary_t>    shaderBinaries;
+    memory_allocator_t*                             pMemoryAllocator;
+    dynamic_array_t<vertex_buffer_t>                vertexBuffers;
+    dynamic_array_t<render_pass_t>                  renderPasses;
+    dynamic_array_t<render_target_t>                renderTargets;
+    dynamic_array_t<vertex_format_t>                vertexFormats;
+    hash_map_t<graphics_pipeline_state_t>           pipelineStates;
+    //dynamic_array_t<graphics_pipeline_state_t>      pipelineStates;
+    dynamic_array_t<upload_buffer_t>                uploadBuffers;
+    dynamic_array_t<shader_binary_t>                shaderBinaries;
 
-    render_pass_t*                      pFirstFreeRenderPass;
+    render_pass_t*                                  pFirstFreeRenderPass;
 
-    flags8_t<render_resource_flags_t>   flags;
+    flags8_t<render_resource_flags_t>               flags;
 };
 
 struct graphics_frame_t
@@ -517,9 +560,73 @@ enum assert_result_t
     assert_result_exit
 };
 
-constexpr uint64_t          defaultAllocationAlignment      = 16u;
-constexpr uint32_t          invalidResourceHandleValue      = ~0u;
-constexpr memory_buffer_t   emptyMemoryBuffer               = {nullptr, 0u};
+constexpr memory_buffer_t   emptyMemoryBuffer = {nullptr, 0u};
+
+
+D3D12_BLEND_DESC createDefaultBlendDesc()
+{
+   D3D12_BLEND_DESC defaultBlendDesc = {};
+   defaultBlendDesc.AlphaToCoverageEnable                   = FALSE;
+   defaultBlendDesc.IndependentBlendEnable                  = FALSE;
+   defaultBlendDesc.RenderTarget[0].BlendEnable             = FALSE;
+   defaultBlendDesc.RenderTarget[0].LogicOpEnable           = FALSE;
+   defaultBlendDesc.RenderTarget[0].SrcBlend                = D3D12_BLEND_ONE;
+   defaultBlendDesc.RenderTarget[0].DestBlend               = D3D12_BLEND_ZERO;
+   defaultBlendDesc.RenderTarget[0].BlendOp                 = D3D12_BLEND_OP_ADD;
+   defaultBlendDesc.RenderTarget[0].SrcBlendAlpha           = D3D12_BLEND_ONE;
+   defaultBlendDesc.RenderTarget[0].DestBlendAlpha          = D3D12_BLEND_ZERO;
+   defaultBlendDesc.RenderTarget[0].BlendOpAlpha            = D3D12_BLEND_OP_ADD;
+   defaultBlendDesc.RenderTarget[0].LogicOp                 = D3D12_LOGIC_OP_NOOP;
+   defaultBlendDesc.RenderTarget[0].RenderTargetWriteMask   = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+   return defaultBlendDesc;
+}
+
+D3D12_DEPTH_STENCIL_DESC createDefaultDepthStencilDesc()
+{
+    D3D12_DEPTH_STENCIL_DESC defaultDepthStencilDesc = {};
+    defaultDepthStencilDesc.DepthEnable                     = TRUE;
+    defaultDepthStencilDesc.DepthWriteMask                  = D3D12_DEPTH_WRITE_MASK_ALL;
+    defaultDepthStencilDesc.DepthFunc                       = D3D12_COMPARISON_FUNC_LESS;
+    defaultDepthStencilDesc.StencilEnable                   = FALSE;
+    defaultDepthStencilDesc.StencilReadMask                 = D3D12_DEFAULT_STENCIL_READ_MASK;
+    defaultDepthStencilDesc.StencilWriteMask                = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    defaultDepthStencilDesc.FrontFace.StencilFailOp         = D3D12_STENCIL_OP_KEEP;
+    defaultDepthStencilDesc.FrontFace.StencilDepthFailOp    = D3D12_STENCIL_OP_KEEP;
+    defaultDepthStencilDesc.FrontFace.StencilPassOp         = D3D12_STENCIL_OP_KEEP;
+    defaultDepthStencilDesc.FrontFace.StencilFunc           = D3D12_COMPARISON_FUNC_ALWAYS;
+    defaultDepthStencilDesc.BackFace.StencilFailOp          = D3D12_STENCIL_OP_KEEP;
+    defaultDepthStencilDesc.BackFace.StencilDepthFailOp     = D3D12_STENCIL_OP_KEEP;
+    defaultDepthStencilDesc.BackFace.StencilPassOp          = D3D12_STENCIL_OP_KEEP;
+    defaultDepthStencilDesc.BackFace.StencilFunc            = D3D12_COMPARISON_FUNC_ALWAYS;
+
+    return defaultDepthStencilDesc;
+}
+
+D3D12_RASTERIZER_DESC createDefaultRasterizerDesc()
+{
+   D3D12_RASTERIZER_DESC defaultRasterizerDesc = {};
+   defaultRasterizerDesc.FillMode               = D3D12_FILL_MODE_SOLID;
+   defaultRasterizerDesc.CullMode               = D3D12_CULL_MODE_BACK;
+   defaultRasterizerDesc.DepthBias              = 0;
+   defaultRasterizerDesc.DepthBiasClamp         = 0.0f;
+   defaultRasterizerDesc.SlopeScaledDepthBias   = 0.0f;
+   defaultRasterizerDesc.DepthClipEnable        = TRUE;
+   defaultRasterizerDesc.MultisampleEnable      = FALSE;
+   defaultRasterizerDesc.AntialiasedLineEnable  = FALSE;
+   defaultRasterizerDesc.ForcedSampleCount      = 0;
+   defaultRasterizerDesc.ConservativeRaster     = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+   return defaultRasterizerDesc;
+}
+
+template<typename D, typename S>
+D rangeCheckCast(S value)
+{
+    ASSERT_ALWAYS(value < std::numeric_limits<S>::max());
+    ASSERT_ALWAYS(value > std::numeric_limits<S>::min());
+    return (D)value;
+}
 
 template<typename T>
 T createInvalidResourceHandle()
@@ -1074,6 +1181,209 @@ bool createFence(D3D12DeviceType* pDevice, ID3D12Fence** pOutFence, const uint32
     return true;
 }
 
+hash32_t generateHash(const void* pData, const uint64_t dataSizeInBytes)
+{
+    const char* pDataBuffer = (const char*)pData;
+    hash32_t hash = 5381;
+    for(uint64_t i = 0; i < dataSizeInBytes; ++i)
+    {
+        int c = *pDataBuffer++;
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
+template<typename T>
+hash_map_node_t<T>* getFreeHashMapNode(hash_map_t<T>* pHashMap)
+{
+    if(pHashMap->count + 1 == pHashMap->capacity)
+    {
+        return nullptr;
+    }
+
+    return pHashMap->pFreeNodes + pHashMap->count;
+}
+
+template<typename T>
+hash_map_entry_t<T*> findOrInsertIntoHashmap(hash_map_t<T>* pHashMap, const void* pData, const uint64_t dataSizeInBytes)
+{
+    const hash32_t hash = generateHash(pData, dataSizeInBytes);
+    const uint32_t index = hash % pHashMap->capacity;
+    bool foundNode = false;
+    hash_map_node_t<T>** ppNode = &pHashMap->ppBaseNodes[index];
+    hash_map_node_t<T>* pNode = *ppNode;
+    hash_map_node_t<T>* pPrevNode = pHashMap->ppBaseNodes[index];
+
+    while(true)
+    {
+        if(pNode == nullptr)
+        {
+            break;
+        }
+
+        foundNode = (pNode->hash == hash);
+        if(foundNode)
+        {
+            break;
+        }
+        
+        pPrevNode = pNode;
+        ppNode = (hash_map_node_t<T>**)&pNode->pNext;
+        pNode = *ppNode;
+    }
+
+    if(foundNode)
+    {
+        hash_map_entry_t<T*> entry;
+        entry.isNew = false;
+        entry.value = &(*ppNode)->value;
+        return entry;
+    }
+    
+    hash_map_node_t<T>* pNewNode = getFreeHashMapNode(pHashMap);
+    if(pNewNode == nullptr)
+    {
+        //FK: Note: hashmap doesn't grow yet.
+        ASSERT_DEBUG_UNREACHABLE_CODE();
+    }
+
+    ++pHashMap->count;
+    pNewNode->hash = hash;
+    *ppNode = pNewNode;
+
+    hash_map_entry_t<T*> entry;
+    entry.isNew = true;
+    entry.value = &(*ppNode)->value;
+    return entry;
+}
+
+const char* getVertexAttributeSemanticBaseName(const vertex_attribute_t attribute)
+{
+    static_assert((uint32_t)vertex_attribute_t::count == 2u);
+
+    switch(attribute)
+    {
+        case vertex_attribute_t::color:
+            return "COLOR";
+        case vertex_attribute_t::position:
+            return "POSITION";
+    }
+
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return nullptr;
+}
+
+DXGI_FORMAT convertVertexAttributeFormat(const vertex_attribute_entry_t* pVertexAttribute)
+{
+    static_assert((uint32_t)vertex_attribute_type_t::count == 1u);
+
+    switch(pVertexAttribute->type)
+    {
+        case vertex_attribute_type_t::float32:
+            if(pVertexAttribute->count == 1u) return DXGI_FORMAT_R32_FLOAT;
+            if(pVertexAttribute->count == 2u) return DXGI_FORMAT_R32G32_FLOAT;
+            if(pVertexAttribute->count == 3u) return DXGI_FORMAT_R32G32B32_FLOAT;
+            if(pVertexAttribute->count == 4u) return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    }
+
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+D3D12_INPUT_CLASSIFICATION convertVertexAttributeInputFrequency(const vertex_attribute_frequency_t frequency)
+{
+    static_assert((uint32_t)vertex_attribute_frequency_t::count == 2u);
+
+    switch(frequency)
+    {
+        case vertex_attribute_frequency_t::vertex:
+            return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        case vertex_attribute_frequency_t::instance:
+            return D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
+    }
+
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+}
+
+void convertVertexFormatToInputElementDescriptions(const vertex_format_t* pVertexFormat, D3D12_INPUT_ELEMENT_DESC* pOutInputElementDescs, uint32_t* pOutInputElementCount)
+{
+    for(uint32_t vertexAttributeIndex = 0u; vertexAttributeIndex < pVertexFormat->vertexAttributeCount; ++vertexAttributeIndex)
+    {
+        pOutInputElementDescs[vertexAttributeIndex].SemanticName            = getVertexAttributeSemanticBaseName(pVertexFormat->pVertexAttributes[vertexAttributeIndex].attribute);
+        pOutInputElementDescs[vertexAttributeIndex].Format                  = convertVertexAttributeFormat(&pVertexFormat->pVertexAttributes[vertexAttributeIndex]);
+        pOutInputElementDescs[vertexAttributeIndex].SemanticIndex           = 0u;
+        pOutInputElementDescs[vertexAttributeIndex].InputSlot               = 0u;
+        pOutInputElementDescs[vertexAttributeIndex].InputSlotClass          = convertVertexAttributeInputFrequency(pVertexFormat->pVertexAttributes[vertexAttributeIndex].frequency);
+        pOutInputElementDescs[vertexAttributeIndex].AlignedByteOffset       = pVertexFormat->pVertexAttributes[vertexAttributeIndex].offsetInBytes;
+        pOutInputElementDescs[vertexAttributeIndex].InstanceDataStepRate    = 0u;
+    }
+
+    *pOutInputElementCount = pVertexFormat->vertexAttributeCount;
+}
+
+graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphicsFrame, const graphics_pipeline_state_parameters_t* pPipelineStateParameters)
+{
+    hash_map_entry_t<graphics_pipeline_state_t*> pipelineState = findOrInsertIntoHashmap(&pGraphicsFrame->pRenderResourceCache->pipelineStates, pPipelineStateParameters, sizeof(pPipelineStateParameters));
+    if(!pipelineState.isNew)
+    {
+        return pipelineState.value;
+    }
+    
+    graphics_pipeline_state_t* pPipelineState = pipelineState.value;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ID3DBlob* pRootSignatureBlob = nullptr;
+    ID3DBlob* pErrorBlob = nullptr;
+    D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &pRootSignatureBlob, &pErrorBlob);
+    ID3D12RootSignature* pRootSignature = nullptr;
+    pGraphicsFrame->pDevice->CreateRootSignature(0u, pRootSignatureBlob->GetBufferPointer(), pRootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&pRootSignature));
+
+    uint32_t inputElementCount = 0u;
+    D3D12_INPUT_ELEMENT_DESC inputElementDescs[maxVertexAttributeCount] = {};
+    convertVertexFormatToInputElementDescriptions(pPipelineStateParameters->pVertexFormat, inputElementDescs, &inputElementCount);
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPipelineStateDesc = {};
+    graphicsPipelineStateDesc.VS.BytecodeLength     = pPipelineStateParameters->pVertexShader->shaderBlobSizeInBytes;
+    graphicsPipelineStateDesc.VS.pShaderBytecode    = pPipelineStateParameters->pVertexShader->pShaderBlob;
+    graphicsPipelineStateDesc.PS.BytecodeLength     = pPipelineStateParameters->pPixelShader->shaderBlobSizeInBytes;
+    graphicsPipelineStateDesc.PS.pShaderBytecode    = pPipelineStateParameters->pPixelShader->pShaderBlob;
+    graphicsPipelineStateDesc.NumRenderTargets      = 1u;
+    graphicsPipelineStateDesc.SampleMask            = 0xFFFFFFFF;
+    graphicsPipelineStateDesc.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+    graphicsPipelineStateDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    graphicsPipelineStateDesc.SampleDesc.Count      = 1u;
+    graphicsPipelineStateDesc.SampleDesc.Quality    = 0u;
+    graphicsPipelineStateDesc.BlendState            = createDefaultBlendDesc();
+    graphicsPipelineStateDesc.DepthStencilState     = createDefaultDepthStencilDesc();
+    graphicsPipelineStateDesc.RasterizerState       = createDefaultRasterizerDesc();
+    graphicsPipelineStateDesc.pRootSignature        = pRootSignature;
+    
+    graphicsPipelineStateDesc.InputLayout.NumElements = inputElementCount;
+    graphicsPipelineStateDesc.InputLayout.pInputElementDescs = inputElementDescs;
+
+    ID3D12PipelineState* pPipelineStateObject = nullptr;
+    const HRESULT pipelineStateObjectResult = pGraphicsFrame->pDevice->CreateGraphicsPipelineState(&graphicsPipelineStateDesc, IID_PPV_ARGS(&pPipelineStateObject));
+    if(pipelineStateObjectResult != S_OK)
+    {
+        logError("'%s' while trying to create graphics pipeline state '%s'.", getHResultString(pipelineStateObjectResult), pPipelineStateParameters->pName);
+        return nullptr;
+    }
+
+    setD3D12ObjectDebugName(pPipelineStateObject, pPipelineStateParameters->pName);
+    
+    pPipelineState->pPipelineState = pPipelineStateObject;
+    pPipelineState->pRootSignature = pRootSignature;
+    return pPipelineState;
+}
+
+void destroyGraphicsPipelineState(graphics_pipeline_state_t* pGraphicsPipelineState)
+{
+    
+}
+
 void destroyGraphicsFrame(graphics_frame_t* pGraphicsFrame)
 {
     flushFrame(pGraphicsFrame);
@@ -1375,6 +1685,49 @@ void createDynamicArrayWithPreallocatedMemory(base_dynamic_array_t* pOutArray, m
     pOutArray->elementSizeInBytes   = sizeof(T);
 }
 
+template<typename T>
+bool createDynamicArray(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, const uint32_t elementCapacity, alloc_flags_t allocationFlags)
+{
+    void* pArrayMemory = allocateFromAllocator(pMemoryAllocator, elementCapacity * sizeof(T));
+    if(pArrayMemory == nullptr)
+    {
+        return false;
+    }
+
+    pOutArray->pMemoryAllocator     = pMemoryAllocator;
+    pOutArray->pData                = (T*)pArrayMemory;
+    pOutArray->count                = 0u;
+    pOutArray->capacity             = elementCapacity;
+    pOutArray->elementSizeInBytes   = sizeof(T);
+    return true;
+}
+
+template<typename T>
+bool createHashMap(hash_map_t<T>* pOutHashMap, memory_allocator_t* pMemoryAllocator, const uint32_t nodeCapacity, alloc_flags_t allocationFlags)
+{
+    const uint64_t nodeSizeInBytes = sizeof(hash_map_node_t<T>);
+    void* pFreeNodesMemory = allocateFromAllocator(pMemoryAllocator, nodeSizeInBytes * nodeCapacity, allocationFlags);
+    if(pFreeNodesMemory == nullptr)
+    {
+        return false;
+    }
+
+    void* ppBaseNodesMemory = allocateFromAllocator(pMemoryAllocator, nodeCapacity * sizeof(void*), allocationFlags);
+    if(ppBaseNodesMemory == nullptr)
+    {
+        freeFromAllocator(pMemoryAllocator, pFreeNodesMemory);
+        return false;
+    }
+
+    pOutHashMap->ppBaseNodes        = (hash_map_node_t<T>**)ppBaseNodesMemory;
+    pOutHashMap->pFreeNodes         = (hash_map_node_t<T>*)pFreeNodesMemory;
+    pOutHashMap->pMemoryAllocator   = pMemoryAllocator;
+    pOutHashMap->count              = 0u;
+    pOutHashMap->capacity           = nodeCapacity;
+
+    return true;
+}
+
 void* pushBackFromDynamicArrayDontGrow(base_dynamic_array_t* pArray, const uint32_t count)
 {
     const uint32_t newArrayCount = pArray->count + count;
@@ -1458,51 +1811,35 @@ bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPa
     return true;
 }
 
+void destroyRenderResourceCache(render_resource_cache_t* pRenderResourceCache)
+{
+    
+}
+
 bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t* pOutRenderResourceCache, memory_allocator_t* pMemoryAllocator, const render_context_parameters_t::limits_t* pLimits, const bool notifyOnLimitReach)
 {
-    uint64_t totalAllocationSizeInBytes = 0u;
-    totalAllocationSizeInBytes += sizeof(vertex_buffer_t) * pLimits->maxVertexBufferCount;
-    totalAllocationSizeInBytes += sizeof(vertex_format_t) * pLimits->maxVertexFormatCount;
-    totalAllocationSizeInBytes += sizeof(shader_binary_t) * pLimits->maxShaderBinaryCount;
-    totalAllocationSizeInBytes += sizeof(render_target_t) * pLimits->maxRenderTargetCount;
-    totalAllocationSizeInBytes += sizeof(graphics_pipeline_state_t) * pLimits->maxPipelineStateCount;
-    totalAllocationSizeInBytes += sizeof(upload_buffer_t) * pLimits->maxUploadBufferCount;
-    totalAllocationSizeInBytes += sizeof(render_pass_t) * pLimits->maxRenderPassCount;
-
-    uint8_t* pResourceBlob = (uint8_t*)allocateFromAllocator(pMemoryAllocator, totalAllocationSizeInBytes, alloc_flag_clear_memory);
-    if(pResourceBlob == nullptr)
-    {
-        return false;
-    }
-
-    uint64_t offsetInBytes = 0u;
-    createDynamicArrayWithPreallocatedMemory<vertex_buffer_t>(&pOutRenderResourceCache->vertexBuffers, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxVertexBufferCount);
-    offsetInBytes += sizeof(vertex_buffer_t) * pLimits->maxVertexBufferCount;
-
-    createDynamicArrayWithPreallocatedMemory<vertex_format_t>(&pOutRenderResourceCache->vertexFormats, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxVertexFormatCount);
-    offsetInBytes += sizeof(vertex_format_t) * pLimits->maxVertexFormatCount;
-    
-    createDynamicArrayWithPreallocatedMemory<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxShaderBinaryCount);
-    offsetInBytes += sizeof(shader_binary_t) * pLimits->maxShaderBinaryCount;
-
-    createDynamicArrayWithPreallocatedMemory<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxRenderTargetCount);
-    offsetInBytes += sizeof(render_target_t) * pLimits->maxRenderTargetCount;
-
-    createDynamicArrayWithPreallocatedMemory<graphics_pipeline_state_t>(&pOutRenderResourceCache->pipelineStates, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxPipelineStateCount);
-    offsetInBytes += sizeof(graphics_pipeline_state_t) * pLimits->maxPipelineStateCount;
-
-    createDynamicArrayWithPreallocatedMemory<upload_buffer_t>(&pOutRenderResourceCache->uploadBuffers, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxUploadBufferCount);
-    offsetInBytes += sizeof(upload_buffer_t) * pLimits->maxUploadBufferCount;
-
-    createDynamicArrayWithPreallocatedMemory<render_pass_t>(&pOutRenderResourceCache->renderPasses, pMemoryAllocator, pResourceBlob + offsetInBytes, pLimits->maxRenderPassCount);
-    offsetInBytes += sizeof(render_pass_t) * pLimits->maxRenderPassCount;
-
-    pOutRenderResourceCache->flags = 0u;
     pOutRenderResourceCache->pMemoryAllocator = pMemoryAllocator;
-    
+    pOutRenderResourceCache->flags = 0u;
+
     if(notifyOnLimitReach)
     {
         pOutRenderResourceCache->flags |= render_resource_flags_t::notify_on_array_grow;
+    }
+
+    uint64_t offsetInBytes = 0u;
+    bool renderResourceCacheAllocationFailed = false;
+    renderResourceCacheAllocationFailed |= !createDynamicArray<vertex_buffer_t>(&pOutRenderResourceCache->vertexBuffers, pMemoryAllocator, pLimits->maxVertexBufferCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createDynamicArray<vertex_format_t>(&pOutRenderResourceCache->vertexFormats, pMemoryAllocator, pLimits->maxVertexFormatCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createDynamicArray<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pLimits->maxShaderBinaryCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createDynamicArray<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pLimits->maxRenderTargetCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createHashMap<graphics_pipeline_state_t>(&pOutRenderResourceCache->pipelineStates, pMemoryAllocator, pLimits->maxPipelineStateCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createDynamicArray<upload_buffer_t>(&pOutRenderResourceCache->uploadBuffers, pMemoryAllocator, pLimits->maxUploadBufferCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createDynamicArray<render_pass_t>(&pOutRenderResourceCache->renderPasses, pMemoryAllocator, pLimits->maxRenderPassCount, alloc_flag_clear_memory);
+
+    if(renderResourceCacheAllocationFailed)
+    {
+        destroyRenderResourceCache(pOutRenderResourceCache);
+        return false;
     }
 
     pOutRenderResourceCache->pFirstFreeRenderPass = createRenderPassChain((render_pass_t*)pOutRenderResourceCache->renderPasses.pData, pOutRenderResourceCache->renderPasses.capacity);
@@ -1691,11 +2028,6 @@ render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
     render_pass_t* pFreeRenderPass = pRenderResourceCache->pFirstFreeRenderPass;
     pRenderResourceCache->pFirstFreeRenderPass = pFreeRenderPass->pNext;
     return pFreeRenderPass;
-}
-
-graphics_pipeline_state_t* allocatePipelineState(render_resource_cache_t* pRenderResourceCache)
-{
-    return (graphics_pipeline_state_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->pipelineStates, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "pipeline state objects");
 }
 
 upload_buffer_t* allocateUploadBuffer(render_resource_cache_t* pRenderResourceCache)
@@ -2070,14 +2402,6 @@ bool isValidCompilerDefines(const char* pCompilerDefines)
     }
 
     return true;
-}
-
-template<typename T>
-T rangeCheckCast(size_t value)
-{
-    ASSERT_ALWAYS(value <= std::numeric_limits<T>::max());
-    ASSERT_ALWAYS(value >= std::numeric_limits<T>::min());
-    return (T)value;
 }
 
 void freeCompilerArguments(memory_allocator_t* pMemoryAllocator, dxc_arguments_t* pArguments)
