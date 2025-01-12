@@ -6,6 +6,8 @@
 #include <stdio.h>
 
 #define USE_D3D12_DEBUG 1
+#define USE_VALIDATION 1
+#define BREAK_ON_VALIDATION_ERROR 1
 #define CLEAR_NEW_MEMORY_WITH_ZEROES 1
 #define USE_DEBUG_ASSERTS 1
 #include <d3d12.h>
@@ -40,6 +42,17 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
 #define COM_RELEASE(ptr)if(ptr != nullptr) { (ptr)->Release(); ptr = nullptr; }
 
+#if BREAK_ON_VALIDATION_ERROR
+#define VALIDATE_BREAK() DebugBreak()
+#else
+#define VALIDATE_BREAK()
+#endif
+
+#if USE_VALIDATION
+#define VALIDATE(x, msg) if(!(x)){printf(msg); VALIDATE_BREAK();}
+#else
+#define VALIDATE(x, msg)
+#endif
 
 #define ASSERT_ALWAYS_MSG(x, msg)               \
 {                                               \
@@ -75,6 +88,9 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
 #define UNREACHABLE_CODE()      __assume(0)
 #define UNUSED_PARAMETER(var)   (void)(var)
+
+#define GET_MIN(a,b) (a)>(b)?(b):(a)
+#define GET_MAX(a,b) (a)<(b)?(b):(a)
 
 struct memory_allocator_t;
 struct render_context_t;
@@ -317,6 +333,7 @@ struct graphics_pipeline_state_t
 {
     ID3D12PipelineState* pPipelineState;
     ID3D12RootSignature* pRootSignature;
+    graphics_pipeline_state_t* pNext;
 };
 
 enum upload_buffer_flags_t : uint8_t
@@ -363,14 +380,16 @@ struct vertex_attribute_entry_t
 
 struct vertex_format_t
 {
-    vertex_attribute_entry_t    pVertexAttributes[maxVertexAttributeCount];
-    uint32_t                    vertexAttributeCount;
+    D3D12_INPUT_ELEMENT_DESC    pInputElementDescs[maxVertexAttributeCount];
+    uint32_t                    inputElementCount;
+    vertex_format_t*            pNext;
 };
 
 struct vertex_buffer_t
 {
     d3d12_resource_t bufferResource;
     uint32_t         sizeInBytes;
+    vertex_buffer_t* pNext;
 };
 
 struct shader_binary_t
@@ -426,6 +445,8 @@ template<typename T>
 struct hash_map_entry_t
 {
     T value;
+    uint32_t nodeIndex;
+    hash32_t hash;
     bool isNew;
 };
 
@@ -457,8 +478,8 @@ struct render_resource_cache_t
     dynamic_array_t<vertex_buffer_t>                vertexBuffers;
     dynamic_array_t<render_pass_t>                  renderPasses;
     dynamic_array_t<render_target_t>                renderTargets;
-    dynamic_array_t<vertex_format_t>                vertexFormats;
     hash_map_t<graphics_pipeline_state_t>           pipelineStates;
+    hash_map_t<vertex_format_t>                     vertexFormats;
     //dynamic_array_t<graphics_pipeline_state_t>      pipelineStates;
     dynamic_array_t<upload_buffer_t>                uploadBuffers;
     dynamic_array_t<shader_binary_t>                shaderBinaries;
@@ -478,6 +499,10 @@ struct graphics_frame_t
     render_pass_t*                          pFirstRenderPassToExecute;
     render_pass_t*                          pLastRenderPassToExecute;
     upload_buffer_t*                        pFirstUploadBuffer;
+    upload_buffer_t*                        pFirstUploadBufferToFree;
+    vertex_buffer_t*                        pFirstVertexBufferToFree;
+    vertex_format_t*                        pFirstVertexFormatToFree;
+    graphics_pipeline_state_t*              pFirstGraphicsPipelineToFree;
     uint64_t                                frameIndex;
     uint32_t                                openRenderPassCount;
     D3D12DeviceType*                        pDevice;
@@ -903,14 +928,60 @@ void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, re
     }
 }
 
+void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
+{
+    {
+        vertex_buffer_t* pVertexBufferToFree = pGraphicsFrame->pFirstVertexBufferToFree;
+        while(pVertexBufferToFree != nullptr)
+        {
+            vertex_buffer_t* pNextVertexBuffer = pVertexBufferToFree->pNext;
+            COM_RELEASE(pVertexBufferToFree->bufferResource.pResource);
+            pVertexBufferToFree = pNextVertexBuffer;       
+        }
+
+        pGraphicsFrame->pFirstVertexBufferToFree = nullptr;
+    }
+
+    {
+        upload_buffer_t* pUploadBufferToFree = pGraphicsFrame->pFirstUploadBufferToFree;
+        while(pUploadBufferToFree != nullptr)
+        {
+            upload_buffer_t* pNextUploadBuffer = pUploadBufferToFree->pNext;
+            COM_RELEASE(pUploadBufferToFree->bufferResource.pResource);
+            pUploadBufferToFree = pNextUploadBuffer;
+        }
+
+        pGraphicsFrame->pFirstUploadBufferToFree = nullptr;
+    }
+
+    {
+        graphics_pipeline_state_t* pGraphicsPipelineStateToFree = pGraphicsFrame->pFirstGraphicsPipelineToFree;
+        while(pGraphicsPipelineStateToFree != nullptr)
+        {
+            graphics_pipeline_state_t* pNextGraphicsPipelineStateToFree = pGraphicsPipelineStateToFree->pNext;
+            COM_RELEASE(pGraphicsPipelineStateToFree->pPipelineState);
+            COM_RELEASE(pGraphicsPipelineStateToFree->pRootSignature);
+            pGraphicsPipelineStateToFree = pNextGraphicsPipelineStateToFree;
+        }
+
+        pGraphicsFrame->pFirstGraphicsPipelineToFree = nullptr;
+    }
+}
+
 void flushFrame(graphics_frame_t* pGraphicsFrame)
 {
     const DWORD waitResult = WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
     ASSERT_DEBUG(waitResult == WAIT_OBJECT_0);
+
+    freePendingFrameResources(pGraphicsFrame);
 }
 
 void resetFrame(graphics_frame_t* pGraphicsFrame)
 {
+    VALIDATE(pGraphicsFrame->pFirstVertexBufferToFree == nullptr, "Pending free vertex buffer, don't forget to call 'freePendingFrameResources()'.");
+    VALIDATE(pGraphicsFrame->pFirstGraphicsPipelineToFree == nullptr, "Pending free graphics pipeline, don't forget to call 'freePendingFrameResources()'.");
+    VALIDATE(pGraphicsFrame->pFirstUploadBufferToFree == nullptr, "Pending free upload buffer, don't forget to call 'freePendingFrameResources()'.");
+
     COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator->Reset());
     COM_CALL(pGraphicsFrame->pFrameGeneralGraphicsQueue->Reset(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator, nullptr));
 
@@ -1205,7 +1276,15 @@ hash_map_node_t<T>* getFreeHashMapNode(hash_map_t<T>* pHashMap)
 }
 
 template<typename T>
-hash_map_entry_t<T*> findOrInsertIntoHashmap(hash_map_t<T>* pHashMap, const void* pData, const uint64_t dataSizeInBytes)
+uint32_t calculateHashmapEntryIndex(const void* pNode, const hash_map_t<T>* pHashMap)
+{
+    const ptrdiff_t nodeDistanceFromBase = (ptrdiff_t)pNode - (ptrdiff_t)pHashMap->ppBaseNodes[0];
+    const ptrdiff_t nodeIndex = (nodeDistanceFromBase >> 3);
+    return rangeCheckCast<uint32_t>(nodeIndex);
+}
+
+template<typename T>
+hash_map_entry_t<T*> findOrInsertEntryIntoHashMap(hash_map_t<T>* pHashMap, const void* pData, const uint64_t dataSizeInBytes)
 {
     const hash32_t hash = generateHash(pData, dataSizeInBytes);
     const uint32_t index = hash % pHashMap->capacity;
@@ -1235,8 +1314,10 @@ hash_map_entry_t<T*> findOrInsertIntoHashmap(hash_map_t<T>* pHashMap, const void
     if(foundNode)
     {
         hash_map_entry_t<T*> entry;
-        entry.isNew = false;
-        entry.value = &(*ppNode)->value;
+        entry.isNew     = false;
+        entry.value     = &(*ppNode)->value;
+        entry.nodeIndex = calculateHashmapEntryIndex(pNode, pHashMap);
+        entry.hash      = hash;
         return entry;
     }
     
@@ -1252,9 +1333,41 @@ hash_map_entry_t<T*> findOrInsertIntoHashmap(hash_map_t<T>* pHashMap, const void
     *ppNode = pNewNode;
 
     hash_map_entry_t<T*> entry;
-    entry.isNew = true;
-    entry.value = &(*ppNode)->value;
+    entry.isNew     = true;
+    entry.value     = &(*ppNode)->value;
+    entry.nodeIndex = calculateHashmapEntryIndex(pNode, pHashMap);
+    entry.hash      = hash;
     return entry;
+}
+
+template<typename T>
+void removeEntryFromHashMap(hash_map_t<T>* pHashMap, const hash_map_entry_t<T*>* pEntry)
+{
+    const uint32_t nodeIndex = pEntry->nodeIndex;
+    ASSERT_ALWAYS(pHashMap->ppBaseNodes[nodeIndex] != nullptr);
+    ASSERT_ALWAYS(pHashMap->count > 0u);
+
+    hash_map_node_t<T>* pPrevNode = nullptr;
+    hash_map_node_t<T>* pNode = pHashMap->ppBaseNodes[nodeIndex];
+    while(pNode->hash != pEntry->hash)
+    {
+        pPrevNode = pNode;
+        pNode = (hash_map_node_t<T>*)pNode->pNext;
+    }
+
+    hash_map_node_t<T>* pNextNode = pNode->pNext;
+    if(pPrevNode == nullptr)
+    {
+        pHashMap->ppBaseNodes[nodeIndex] = pNextNode;
+    }
+    else
+    {
+        pPrevNode->pNext = pNextNode;
+    }
+
+    const uint32_t freeNodesIndex = pHashMap->capacity - pHashMap->count;
+    pHashMap->pFreeNodes[freeNodesIndex] = *pNode;
+    pHashMap->count -= 1u;
 }
 
 const char* getVertexAttributeSemanticBaseName(const vertex_attribute_t attribute)
@@ -1306,25 +1419,9 @@ D3D12_INPUT_CLASSIFICATION convertVertexAttributeInputFrequency(const vertex_att
     return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
 }
 
-void convertVertexFormatToInputElementDescriptions(const vertex_format_t* pVertexFormat, D3D12_INPUT_ELEMENT_DESC* pOutInputElementDescs, uint32_t* pOutInputElementCount)
-{
-    for(uint32_t vertexAttributeIndex = 0u; vertexAttributeIndex < pVertexFormat->vertexAttributeCount; ++vertexAttributeIndex)
-    {
-        pOutInputElementDescs[vertexAttributeIndex].SemanticName            = getVertexAttributeSemanticBaseName(pVertexFormat->pVertexAttributes[vertexAttributeIndex].attribute);
-        pOutInputElementDescs[vertexAttributeIndex].Format                  = convertVertexAttributeFormat(&pVertexFormat->pVertexAttributes[vertexAttributeIndex]);
-        pOutInputElementDescs[vertexAttributeIndex].SemanticIndex           = 0u;
-        pOutInputElementDescs[vertexAttributeIndex].InputSlot               = 0u;
-        pOutInputElementDescs[vertexAttributeIndex].InputSlotClass          = convertVertexAttributeInputFrequency(pVertexFormat->pVertexAttributes[vertexAttributeIndex].frequency);
-        pOutInputElementDescs[vertexAttributeIndex].AlignedByteOffset       = pVertexFormat->pVertexAttributes[vertexAttributeIndex].offsetInBytes;
-        pOutInputElementDescs[vertexAttributeIndex].InstanceDataStepRate    = 0u;
-    }
-
-    *pOutInputElementCount = pVertexFormat->vertexAttributeCount;
-}
-
 graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphicsFrame, const graphics_pipeline_state_parameters_t* pPipelineStateParameters)
 {
-    hash_map_entry_t<graphics_pipeline_state_t*> pipelineState = findOrInsertIntoHashmap(&pGraphicsFrame->pRenderResourceCache->pipelineStates, pPipelineStateParameters, sizeof(pPipelineStateParameters));
+    hash_map_entry_t<graphics_pipeline_state_t*> pipelineState = findOrInsertEntryIntoHashMap(&pGraphicsFrame->pRenderResourceCache->pipelineStates, pPipelineStateParameters, sizeof(pPipelineStateParameters));
     if(!pipelineState.isNew)
     {
         return pipelineState.value;
@@ -1340,10 +1437,6 @@ graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphi
     D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &pRootSignatureBlob, &pErrorBlob);
     ID3D12RootSignature* pRootSignature = nullptr;
     pGraphicsFrame->pDevice->CreateRootSignature(0u, pRootSignatureBlob->GetBufferPointer(), pRootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&pRootSignature));
-
-    uint32_t inputElementCount = 0u;
-    D3D12_INPUT_ELEMENT_DESC inputElementDescs[maxVertexAttributeCount] = {};
-    convertVertexFormatToInputElementDescriptions(pPipelineStateParameters->pVertexFormat, inputElementDescs, &inputElementCount);
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPipelineStateDesc = {};
     graphicsPipelineStateDesc.VS.BytecodeLength     = pPipelineStateParameters->pVertexShader->shaderBlobSizeInBytes;
@@ -1361,8 +1454,8 @@ graphics_pipeline_state_t* createGraphicsPipelineState(graphics_frame_t* pGraphi
     graphicsPipelineStateDesc.RasterizerState       = createDefaultRasterizerDesc();
     graphicsPipelineStateDesc.pRootSignature        = pRootSignature;
     
-    graphicsPipelineStateDesc.InputLayout.NumElements = inputElementCount;
-    graphicsPipelineStateDesc.InputLayout.pInputElementDescs = inputElementDescs;
+    graphicsPipelineStateDesc.InputLayout.NumElements = pPipelineStateParameters->pVertexFormat->inputElementCount;
+    graphicsPipelineStateDesc.InputLayout.pInputElementDescs = pPipelineStateParameters->pVertexFormat->pInputElementDescs;
 
     ID3D12PipelineState* pPipelineStateObject = nullptr;
     const HRESULT pipelineStateObjectResult = pGraphicsFrame->pDevice->CreateGraphicsPipelineState(&graphicsPipelineStateDesc, IID_PPV_ARGS(&pPipelineStateObject));
@@ -1458,24 +1551,6 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
 
     createDefaultMemoryAllocator(&graphicsFrame.tempMemoryAllocator);
 
-    render_pass_t* pRenderPasses = (render_pass_t*)allocateFromAllocator(pMemoryAllocator, (sizeof(render_pass_t) * pGraphicsFrameParameters->maxRenderPassCount), alloc_flag_clear_memory);
-    if(pRenderPasses == nullptr)
-    {
-        goto cleanup_and_exit_failure;
-    }
-
-    vertex_buffer_t* pVertexBuffers = (vertex_buffer_t*)allocateFromAllocator(pMemoryAllocator, sizeof(vertex_buffer_t) * pGraphicsFrameParameters->maxVertexBufferCount, alloc_flag_clear_memory);
-    if(pVertexBuffers == nullptr)
-    {
-        goto cleanup_and_exit_failure;
-    }
-
-    upload_buffer_t* pUploadBuffers = (upload_buffer_t*)allocateFromAllocator(pMemoryAllocator, sizeof(upload_buffer_t) * pGraphicsFrameParameters->maxUploadBufferCount, alloc_flag_clear_memory);
-    if(pUploadBuffers == nullptr)
-    {
-        goto cleanup_and_exit_failure;
-    }
-
     if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, &graphicsFrame.pFrameGeneralGraphicsCommandAllocator))
     {
         goto cleanup_and_exit_failure;
@@ -1484,19 +1559,6 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
     if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, graphicsFrame.pFrameGeneralGraphicsCommandAllocator, &graphicsFrame.pFrameGeneralGraphicsQueue))
     {
         goto cleanup_and_exit_failure;
-    }
-
-    for(uint32_t renderPassIndex = 0u; renderPassIndex < pGraphicsFrameParameters->maxRenderPassCount; ++renderPassIndex)
-    {
-        if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, &pRenderPasses[renderPassIndex].pGraphicsCommandAllocator))
-        {
-            goto cleanup_and_exit_failure;
-        }
-
-        if(!createCommandList(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, pRenderPasses[renderPassIndex].pGraphicsCommandAllocator, &pRenderPasses[renderPassIndex].pGraphicsCommandList))
-        {
-            goto cleanup_and_exit_failure;
-        }
     }
 
     graphicsFrame.pDevice = pDevice;
@@ -1688,7 +1750,7 @@ void createDynamicArrayWithPreallocatedMemory(base_dynamic_array_t* pOutArray, m
 template<typename T>
 bool createDynamicArray(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, const uint32_t elementCapacity, alloc_flags_t allocationFlags)
 {
-    void* pArrayMemory = allocateFromAllocator(pMemoryAllocator, elementCapacity * sizeof(T));
+    void* pArrayMemory = allocateFromAllocator(pMemoryAllocator, elementCapacity * sizeof(T), allocationFlags);
     if(pArrayMemory == nullptr)
     {
         return false;
@@ -1790,11 +1852,12 @@ render_pass_t* createRenderPassChain(render_pass_t* pRenderPasses, const uint32_
 }
 
 bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPassInChain)
-{
+{   
+    uint32_t renderPassIndex = 0u;
+    char renderPassDebugNameBuffer[] = "render_pass_graphics_command_allocator_______";
     render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
     while(pCurrentRenderPass != nullptr)
     {
-        
         if(!createCommandAllocator(pDevice, D3D12_COMMAND_LIST_TYPE_DIRECT, &pCurrentRenderPass->pGraphicsCommandAllocator))
         {
             return false;
@@ -1805,7 +1868,14 @@ bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPa
             return false;
         }
 
+        sprintf(renderPassDebugNameBuffer, "render_pass_graphics_command_allocator_%u", renderPassIndex);
+        setD3D12ObjectDebugName(pCurrentRenderPass->pGraphicsCommandAllocator, renderPassDebugNameBuffer);    
+
+        sprintf(renderPassDebugNameBuffer, "render_pass_graphics_command_list_%u", renderPassIndex);
+        setD3D12ObjectDebugName(pCurrentRenderPass->pGraphicsCommandList, renderPassDebugNameBuffer);    
+
         pCurrentRenderPass = pCurrentRenderPass->pNext;
+        ++renderPassIndex;
     }
 
     return true;
@@ -1813,7 +1883,20 @@ bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPa
 
 void destroyRenderResourceCache(render_resource_cache_t* pRenderResourceCache)
 {
-    
+    render_pass_t* pRenderPasses = (render_pass_t*)pRenderResourceCache->renderPasses.pData;
+    for(uint32_t i = 0u; i < pRenderResourceCache->renderPasses.capacity; ++i)
+    {
+        render_pass_t* pRenderPass = &pRenderPasses[i];
+        COM_RELEASE(pRenderPass->pGraphicsCommandAllocator);
+        COM_RELEASE(pRenderPass->pGraphicsCommandList);
+    }
+
+    vertex_buffer_t* pVertexBuffers = (vertex_buffer_t*)pRenderResourceCache->vertexBuffers.pData;
+    for(uint32_t i = 0u; i < pRenderResourceCache->vertexBuffers.capacity; ++i)
+    {
+        vertex_buffer_t* pVertexBuffer = &pVertexBuffers[i];
+        COM_RELEASE(pVertexBuffer->bufferResource.pResource);
+    }
 }
 
 bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t* pOutRenderResourceCache, memory_allocator_t* pMemoryAllocator, const render_context_parameters_t::limits_t* pLimits, const bool notifyOnLimitReach)
@@ -1829,7 +1912,7 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
     uint64_t offsetInBytes = 0u;
     bool renderResourceCacheAllocationFailed = false;
     renderResourceCacheAllocationFailed |= !createDynamicArray<vertex_buffer_t>(&pOutRenderResourceCache->vertexBuffers, pMemoryAllocator, pLimits->maxVertexBufferCount, alloc_flag_clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<vertex_format_t>(&pOutRenderResourceCache->vertexFormats, pMemoryAllocator, pLimits->maxVertexFormatCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createHashMap<vertex_format_t>(&pOutRenderResourceCache->vertexFormats, pMemoryAllocator, pLimits->maxVertexFormatCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pLimits->maxShaderBinaryCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pLimits->maxRenderTargetCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createHashMap<graphics_pipeline_state_t>(&pOutRenderResourceCache->pipelineStates, pMemoryAllocator, pLimits->maxPipelineStateCount, alloc_flag_clear_memory);
@@ -2013,18 +2096,9 @@ shader_binary_t* allocateShaderBinary(render_resource_cache_t* pRenderResourceCa
     return (shader_binary_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "shader binaries");
 }
 
-vertex_format_t* allocateVertexFormat(render_resource_cache_t* pRenderResourceCache)
-{
-    return (vertex_format_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->vertexFormats, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "vertex formats");
-}
-
 render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
 {
-    if(pRenderResourceCache->pFirstFreeRenderPass == nullptr)
-    {
-        DebugBreak();
-    }
-
+    ASSERT_DEBUG(pRenderResourceCache->pFirstFreeRenderPass != nullptr);
     render_pass_t* pFreeRenderPass = pRenderResourceCache->pFirstFreeRenderPass;
     pRenderResourceCache->pFirstFreeRenderPass = pFreeRenderPass->pNext;
     return pFreeRenderPass;
@@ -2090,16 +2164,73 @@ uint32_t getVertexAttributeTypeSizeInBytes(const vertex_attribute_type_t attribu
             DebugBreak();
     }
 
-    UNREACHABLE_CODE();
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return 0u;
+}
+
+uint32_t getDXGIFormatSizeInBytes(const DXGI_FORMAT format) 
+{
+    switch (format) 
+    {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+    case DXGI_FORMAT_R32G32B32A32_UINT:
+    case DXGI_FORMAT_R32G32B32A32_SINT:
+        return 16;
+    case DXGI_FORMAT_R32G32B32_FLOAT:
+    case DXGI_FORMAT_R32G32B32_UINT:
+    case DXGI_FORMAT_R32G32B32_SINT:
+        return 12;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+    case DXGI_FORMAT_R16G16B16A16_UINT:
+    case DXGI_FORMAT_R16G16B16A16_SNORM:
+    case DXGI_FORMAT_R16G16B16A16_SINT:
+        return 8;
+    case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R32G32_UINT:
+    case DXGI_FORMAT_R32G32_SINT:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R10G10B10A2_UINT:
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+        return 4;
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UINT:
+    case DXGI_FORMAT_R8G8B8A8_SNORM:
+    case DXGI_FORMAT_R8G8B8A8_SINT:
+        return 4;
+    case DXGI_FORMAT_R16_FLOAT:
+    case DXGI_FORMAT_R16_UNORM:
+    case DXGI_FORMAT_R16_UINT:
+    case DXGI_FORMAT_R16_SNORM:
+    case DXGI_FORMAT_R16_SINT:
+    case DXGI_FORMAT_R8_UNORM:
+    case DXGI_FORMAT_R8_UINT:
+    case DXGI_FORMAT_R8_SNORM:
+    case DXGI_FORMAT_R8_SINT:
+        return 2;
+    case DXGI_FORMAT_R32_FLOAT:
+    case DXGI_FORMAT_R32_UINT:
+    case DXGI_FORMAT_R32_SINT:
+        return 4;
+    case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:
+        return 4;
+    case DXGI_FORMAT_R8G8_UNORM:
+    case DXGI_FORMAT_R8G8_UINT:
+    case DXGI_FORMAT_R8G8_SNORM:
+    case DXGI_FORMAT_R8G8_SINT:
+        return 2;
+    }
+
+    ASSERT_DEBUG_UNREACHABLE_CODE();
     return 0u;
 }
 
 uint32_t calculateVertexStrideSizeInBytes(const vertex_format_t* pVertexFormat)
 {
     uint32_t strideSizeInBytes = 0u;
-    for(uint32_t attributeIndex = 0u; attributeIndex < pVertexFormat->vertexAttributeCount; ++attributeIndex)
+    for(uint32_t attributeIndex = 0u; attributeIndex < pVertexFormat->inputElementCount; ++attributeIndex)
     {
-        strideSizeInBytes += pVertexFormat->pVertexAttributes[attributeIndex].count * getVertexAttributeTypeSizeInBytes(pVertexFormat->pVertexAttributes[attributeIndex].type);
+        strideSizeInBytes += getDXGIFormatSizeInBytes(pVertexFormat->pInputElementDescs[attributeIndex].Format);
     }
 
     return strideSizeInBytes;
@@ -2155,7 +2286,7 @@ vertex_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame, const uplo
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pUploadBuffer != nullptr);
 
-    vertex_buffer_t* pVertexBuffer = (vertex_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(vertex_buffer_t));
+    vertex_buffer_t* pVertexBuffer = (vertex_buffer_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(vertex_buffer_t), alloc_flag_clear_memory);
     if(pVertexBuffer == nullptr)
     {
         return nullptr;
@@ -2203,22 +2334,75 @@ vertex_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame, const uplo
     return pVertexBuffer;
 }
 
+void releaseUploadBuffer(graphics_frame_t* pGraphicsFrame, upload_buffer_t* pUploadBuffer)
+{
+    ASSERT_DEBUG(pUploadBuffer->pNext == nullptr);
+
+    upload_buffer_t* pPrevUploadBuffer = pGraphicsFrame->pFirstUploadBufferToFree;
+    pUploadBuffer->pNext = pPrevUploadBuffer;
+    pGraphicsFrame->pFirstUploadBufferToFree = pUploadBuffer;
+}
+
+void releaseVertexBuffer(graphics_frame_t* pGraphicsFrame, vertex_buffer_t* pVertexBuffer)
+{
+    ASSERT_DEBUG(pVertexBuffer->pNext == nullptr);
+
+    vertex_buffer_t* pPrevVertexBuffer = pGraphicsFrame->pFirstVertexBufferToFree;
+    pVertexBuffer->pNext = pPrevVertexBuffer;
+    pGraphicsFrame->pFirstVertexBufferToFree = pVertexBuffer;
+}
+
+void releaseVertexFormat(graphics_frame_t* pGraphicsFrame, vertex_format_t* pVertexFormat)
+{
+    ASSERT_DEBUG(pVertexFormat->pNext == nullptr);
+
+    vertex_format_t* pPrevVertexFormat = pGraphicsFrame->pFirstVertexFormatToFree;
+    pVertexFormat->pNext = pPrevVertexFormat;
+    pGraphicsFrame->pFirstVertexFormatToFree = pVertexFormat;
+}
+
+void releaseGraphicsPipeline(graphics_frame_t* pGraphicsFrame, graphics_pipeline_state_t* pGraphicsPipeline)
+{
+    ASSERT_DEBUG(pGraphicsPipeline->pNext == nullptr);
+
+    graphics_pipeline_state_t* pPrevGraphicsPipeline = pGraphicsFrame->pFirstGraphicsPipelineToFree;
+    pGraphicsPipeline->pNext = pPrevGraphicsPipeline;
+    pGraphicsFrame->pFirstGraphicsPipelineToFree = pGraphicsPipeline;
+}
+
+void initializeVertexFormat(graphics_frame_t* pGraphicsFrame, vertex_format_t* pVertexFormat, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
+{
+    //FK: TODO:
+    //VALIDATE(checkDoubleVertexAttributes(pVertexAttributes, vertexAttributeCount));
+    const uint32_t clampedVertexAttributeCount = GET_MIN(vertexAttributeCount, maxVertexAttributeCount);
+    for(uint32_t vertexAttributeIndex = 0u; vertexAttributeIndex < clampedVertexAttributeCount; ++vertexAttributeIndex)
+    {
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].SemanticName         = getVertexAttributeSemanticBaseName(pVertexAttributes[vertexAttributeIndex].attribute);
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].Format               = convertVertexAttributeFormat(&pVertexAttributes[vertexAttributeIndex]);
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].SemanticIndex        = 0u;
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].InputSlot            = 0u;
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].InputSlotClass       = convertVertexAttributeInputFrequency(pVertexAttributes[vertexAttributeIndex].frequency);
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].AlignedByteOffset    = pVertexAttributes[vertexAttributeIndex].offsetInBytes;
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].InstanceDataStepRate = 0u;
+
+        ++pVertexFormat->inputElementCount;
+    }
+}
+
 vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pVertexAttributes != nullptr);
     ASSERT_DEBUG(vertexAttributeCount > 0u);
     
-    vertex_format_t* pVertexFormat = allocateVertexFormat(pGraphicsFrame->pRenderResourceCache);
-    if(pVertexFormat == nullptr)
+    hash_map_entry_t<vertex_format_t*> vertexFormatEntry = findOrInsertEntryIntoHashMap(&pGraphicsFrame->pRenderResourceCache->vertexFormats, pVertexAttributes, sizeof(vertex_attribute_entry_t) * vertexAttributeCount);
+    if(!vertexFormatEntry.isNew)
     {
-        return nullptr;
+        return vertexFormatEntry.value;
     }
 
-    memcpy(pVertexFormat->pVertexAttributes, pVertexAttributes, sizeof(vertex_attribute_entry_t) * vertexAttributeCount);
-    pVertexFormat->vertexAttributeCount = vertexAttributeCount;
-
-    return pVertexFormat;
+    initializeVertexFormat(pGraphicsFrame, vertexFormatEntry.value, pVertexAttributes, vertexAttributeCount);
+    return vertexFormatEntry.value;
 }
 
 upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pData, const uint32_t dataSizeInBytes, upload_buffer_flags_t flags = upload_buffer_flag_none)
@@ -2607,12 +2791,24 @@ void shutdownRenderContext(render_context_t* pRenderContext)
 {
     destroyGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection);
     destroySwapChain(&pRenderContext->swapChain);
+    destroyRenderResourceCache(&pRenderContext->renderResourceCache);
+
+    const bool debugEnabled = (pRenderContext->pDebugLayer != nullptr);
+    ID3D12DebugDevice* pDebugDevice = nullptr;
+    pRenderContext->pDevice->QueryInterface(IID_PPV_ARGS(&pDebugDevice));
+
     COM_RELEASE(pRenderContext->pDefaultDirectCommandQueue);
     COM_RELEASE(pRenderContext->pDefaultCopyCommandQueue);
     COM_RELEASE(pRenderContext->pFactory);
     COM_RELEASE(pRenderContext->pDebugLayer);
     COM_RELEASE(pRenderContext->pDevice);
 
+    if(debugEnabled)
+    {
+        pDebugDevice->ReportLiveDeviceObjects(D3D12_RLDO_DETAIL | D3D12_RLDO_IGNORE_INTERNAL);
+    } 
+
+    COM_RELEASE(pDebugDevice);
     clearMemoryWithZeroes(pRenderContext);
 }
 

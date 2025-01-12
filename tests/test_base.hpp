@@ -193,26 +193,35 @@ bool setup(render_context_t* pRenderContext, HWND pWindowHandle, const uint32_t 
 }
 
 struct test_context_frame_parameter_t;
-typedef void(*testContextFrameCallback)(const test_context_frame_parameter_t*);
-
-struct test_context_t
-{
-    HWND                        pWindowHandle;
-    render_context_t*           pRenderContext;
-    const char*                 pWindowTitle;
-    testContextFrameCallback    pFrameCallback;
-};
+typedef void(*testContextFrameCallback)(test_context_frame_parameter_t*);
+typedef bool(*testContextInitCallback)(test_context_frame_parameter_t*);
 
 struct test_context_frame_parameter_t
 {
     HWND                pWindowHandle;
+	memory_allocator_t*	pAllocator;
     render_context_t*   pRenderContext;
+	graphics_frame_t* 	pGraphicsFrame;
+	void* 				pUserData;
+};
+
+struct test_context_t
+{
+	test_context_frame_parameter_t 	frameParameter;
+    HWND                       		pWindowHandle;
+    render_context_t*          		pRenderContext;
+    const char*                		pWindowTitle;
+    testContextFrameCallback    	pFrameCallback;
+	testContextInitCallback 		pInitCallback;
+	testContextFrameCallback 		pShutdownCallback;
 };
 
 struct test_context_parameters_t
 {
     bool                        useDebugLayer;
     testContextFrameCallback    pFrameCallback;
+	testContextInitCallback 	pInitCallback;
+	testContextFrameCallback 	pShutdownCallback;
 };
 
 result_t<test_context_t> initTestEnvironmentAndWindow(HINSTANCE hInstance, uint32_t width, uint32_t height, const char* pWindowTitle, const test_context_parameters_t* pParameters)
@@ -238,11 +247,17 @@ result_t<test_context_t> initTestEnvironmentAndWindow(HINSTANCE hInstance, uint3
     }
 
     test_context_t testContext = {};
-    testContext.pFrameCallback = pParameters->pFrameCallback;
-    testContext.pRenderContext = pRenderContext;
-    testContext.pWindowHandle  = hwnd;
-    testContext.pWindowTitle   = pWindowTitle;
-
+	testContext.pInitCallback 		= pParameters->pInitCallback;
+	testContext.pShutdownCallback 	= pParameters->pShutdownCallback;
+    testContext.pFrameCallback 		= pParameters->pFrameCallback;
+    testContext.pRenderContext 		= pRenderContext;
+    testContext.pWindowHandle  		= hwnd;
+    testContext.pWindowTitle   		= pWindowTitle;
+	
+	testContext.frameParameter.pAllocator 		= (memory_allocator_t*)calloc(1u, sizeof(memory_allocator_t));
+	createDefaultMemoryAllocator(testContext.frameParameter.pAllocator);
+	testContext.frameParameter.pRenderContext 	= pRenderContext;
+	testContext.frameParameter.pWindowHandle 	= hwnd;
     return testContext;
 }
 
@@ -251,14 +266,13 @@ int startTest(test_context_t* pTestContext)
     LARGE_INTEGER performanceFrequency, startTime, endTime;
 	QueryPerformanceFrequency(&performanceFrequency);
 
+	bool firstFrame = true;
     bool loopRunning = true;
 	MSG msg = {0};
 
-    test_context_frame_parameter_t frameParameters = {};
-    frameParameters.pRenderContext = pTestContext->pRenderContext;
-    frameParameters.pWindowHandle = pTestContext->pWindowHandle;
-
     char windowTitleBuffer[512] = {};
+
+	test_context_frame_parameter_t* pFrameParameter = &pTestContext->frameParameter;
 
 	while (loopRunning)
 	{
@@ -272,7 +286,25 @@ int startTest(test_context_t* pTestContext)
                 if (msg.message == WM_QUIT)
                     loopRunning = false;
             }
-            pTestContext->pFrameCallback(&frameParameters);
+			
+			pFrameParameter->pGraphicsFrame = beginNextFrame(pTestContext->pRenderContext);
+			if(firstFrame)
+			{
+				if(pTestContext->pInitCallback != nullptr)
+				{
+					pTestContext->pInitCallback(pFrameParameter);
+				}
+
+				firstFrame = false;
+			}
+
+            pTestContext->pFrameCallback(pFrameParameter);
+
+			if(loopRunning == false && pTestContext->pShutdownCallback != nullptr)
+			{
+				pTestContext->pShutdownCallback(pFrameParameter);
+			}
+			finishFrame(pTestContext->pRenderContext, pFrameParameter->pGraphicsFrame);
         }
         QueryPerformanceCounter(&endTime);
 

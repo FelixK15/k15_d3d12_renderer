@@ -1,30 +1,22 @@
 #include "../../k15_d3d12_renderer.hpp"
 #include "../test_base.hpp"
 
-void renderFrame(HWND hwnd, graphics_frame_t* pGraphicsFrame)
+void doFrame(test_context_frame_parameter_t* pFrameParameter)
 {
     POINT cursorPos;
     RECT clientRect;
     GetCursorPos(&cursorPos);
-    GetClientRect(hwnd, &clientRect);
+    GetClientRect(pFrameParameter->pWindowHandle, &clientRect);
 
     const float r = (float)cursorPos.x / (float)(clientRect.right - clientRect.left);
     const float g = (float)cursorPos.y / (float)(clientRect.bottom - clientRect.top);
 
     const FLOAT backBufferRGBA[4] = {r, g, 0.2f, 1.0f};
 
-    render_pass_t* pRenderPass = startRenderPass(pGraphicsFrame, "Clear Background");
-    clearColorRenderTarget(pRenderPass, pGraphicsFrame->pBackBuffer, r, g, 0.2f, 1.0f);
-    endRenderPass(pGraphicsFrame, pRenderPass);   
-
-    executeRenderPass(pGraphicsFrame, pRenderPass);
-}
-
-void doFrame(const test_context_frame_parameter_t* pFrameParameter)
-{
-    graphics_frame_t* pFrame = beginNextFrame(pFrameParameter->pRenderContext);
-    renderFrame(pFrameParameter->pWindowHandle, pFrame);
-    finishFrame(pFrameParameter->pRenderContext, pFrame);
+    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Clear Background", pFrameParameter->pGraphicsFrame->pBackBuffer);
+    clearColorRenderTarget(pRenderPass, pFrameParameter->pGraphicsFrame->pBackBuffer, r, g, 0.2f, 1.0f);
+    endRenderPass(pFrameParameter->pGraphicsFrame, pRenderPass);   
+    executeRenderPass(pFrameParameter->pGraphicsFrame, pRenderPass);
 }
 
 int CALLBACK WinMain(HINSTANCE hInstance,
