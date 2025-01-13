@@ -5,20 +5,20 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Launch debug",
+            "name": "Launch debug clear backbuffer",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/debug/render_triangle.exe",
+            "program": "${workspaceFolder}/win32/build/debug/clear_backbuffer.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/win32/build/debug",
             "environment": []
         },
         {
-            "name": "Launch release",
+            "name": "Launch debug render triangle",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/release/render_triangle.exe",
+            "program": "${workspaceFolder}/win32/build/debug/render_triangle.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/win32/build/debug",

@@ -54,6 +54,8 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 #define VALIDATE(x, msg)
 #endif
 
+#define NO_DISCARD [[nodiscard]]
+
 #define ASSERT_ALWAYS_MSG(x, msg)               \
 {                                               \
     if(!(x))                                    \
@@ -497,7 +499,6 @@ struct graphics_frame_t
     render_target_t*                        pBackBuffer;
     memory_allocator_t*                     pMemoryAllocator;
     render_pass_t*                          pFirstRenderPassToExecute;
-    render_pass_t*                          pLastRenderPassToExecute;
     upload_buffer_t*                        pFirstUploadBuffer;
     upload_buffer_t*                        pFirstUploadBufferToFree;
     vertex_buffer_t*                        pFirstVertexBufferToFree;
@@ -972,8 +973,6 @@ void flushFrame(graphics_frame_t* pGraphicsFrame)
 {
     const DWORD waitResult = WaitForSingleObject(pGraphicsFrame->pFrameFinishedEvent, INFINITE);
     ASSERT_DEBUG(waitResult == WAIT_OBJECT_0);
-
-    freePendingFrameResources(pGraphicsFrame);
 }
 
 void resetFrame(graphics_frame_t* pGraphicsFrame)
@@ -987,7 +986,8 @@ void resetFrame(graphics_frame_t* pGraphicsFrame)
 
     markRenderPassChainAsFree(pGraphicsFrame->pRenderResourceCache, pGraphicsFrame->pFirstRenderPassToExecute);
     pGraphicsFrame->pFirstRenderPassToExecute = nullptr;
-    pGraphicsFrame->pLastRenderPassToExecute = nullptr;
+
+    ResetEvent(pGraphicsFrame->pFrameFinishedEvent);
 }
 
 graphics_frame_t* getGraphicsFrameFromGraphicsFrameCollection(graphics_frame_collection_t* pGraphicsFrameCollection, const uint64_t frameIndex)
@@ -1480,20 +1480,11 @@ void destroyGraphicsPipelineState(graphics_pipeline_state_t* pGraphicsPipelineSt
 void destroyGraphicsFrame(graphics_frame_t* pGraphicsFrame)
 {
     flushFrame(pGraphicsFrame);
+    freePendingFrameResources(pGraphicsFrame);
     if(pGraphicsFrame->pFrameFinishedEvent != nullptr)
     {
         CloseHandle(pGraphicsFrame->pFrameFinishedEvent);
     }
-
-#if 0
-    for(uint32_t renderPassIndex = 0u; renderPassIndex < pGraphicsFrame->renderPassCount; ++renderPassIndex)
-    {
-        COM_RELEASE(pGraphicsFrame->pRenderPassBuffer[renderPassIndex].pGraphicsCommandList);
-        COM_RELEASE(pGraphicsFrame->pRenderPassBuffer[renderPassIndex].pGraphicsCommandAllocator);
-    }
-
-    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pGraphicsFrame->pRenderPassBuffer);
-#endif
 
     COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsCommandAllocator);
     COM_RELEASE(pGraphicsFrame->pFrameGeneralGraphicsQueue);
@@ -1541,7 +1532,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
 
     graphics_frame_t graphicsFrame = {0};
     graphicsFrame.pMemoryAllocator = pMemoryAllocator;
-    graphicsFrame.pFrameFinishedEvent = CreateEvent(nullptr, FALSE, TRUE, "");
+    graphicsFrame.pFrameFinishedEvent = CreateEvent(nullptr, TRUE, TRUE, "");
     graphicsFrame.pShaderCompilerContext = pShaderCompilerContext;
     graphicsFrame.pRenderResourceCache = pRenderResourceCache;
     if(graphicsFrame.pFrameFinishedEvent == nullptr)
@@ -2008,12 +1999,15 @@ bool createRenderContext(render_context_t* pRenderContext, const render_context_
         return false;
     }
 
+    setD3D12ObjectDebugName(pRenderContext->pDefaultDirectCommandQueue, "Default Direct Command Queue");
+    setD3D12ObjectDebugName(pRenderContext->pDefaultCopyCommandQueue, "Default Copy Command Queue");
+
     pRenderContext->frameIndex = 1u;
 
     return true;
 }
 
-graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
+NO_DISCARD graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
 {
     ASSERT_DEBUG(pRenderContext != nullptr);
     ASSERT_DEBUG(pRenderContext->pCurrentGraphicsFrame == nullptr);
@@ -2025,6 +2019,7 @@ graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
     graphics_frame_t* pGraphicsFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
     
     flushFrame(pGraphicsFrame);
+    freePendingFrameResources(pGraphicsFrame);
     resetFrame(pGraphicsFrame);
 
     const uint32_t currentBackBufferIndex = pRenderContext->swapChain.pSwapChain->GetCurrentBackBufferIndex();
@@ -2058,9 +2053,9 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
         pRenderPass = pRenderPass->pNext;
     }
 
-    COM_CALL(pRenderContext->pDefaultDirectCommandQueue->Signal(pGraphicsFrame->pFrameFence, pGraphicsFrame->frameIndex));
-
     COM_CALL(pRenderContext->swapChain.pSwapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
+
+    COM_CALL(pRenderContext->pDefaultDirectCommandQueue->Signal(pGraphicsFrame->pFrameFence, pGraphicsFrame->frameIndex));
     COM_CALL(pGraphicsFrame->pFrameFence->SetEventOnCompletion(pGraphicsFrame->frameIndex, pGraphicsFrame->pFrameFinishedEvent));
 
     pRenderContext->pCurrentGraphicsFrame = nullptr;
@@ -2109,7 +2104,7 @@ upload_buffer_t* allocateUploadBuffer(render_resource_cache_t* pRenderResourceCa
     return (upload_buffer_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->uploadBuffers, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "upload buffers");
 }
 
-render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRenderPassName, render_target_t* pRenderTarget)
+NO_DISCARD render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRenderPassName, render_target_t* pRenderTarget)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
 
@@ -2269,19 +2264,9 @@ void executeRenderPass(graphics_frame_t* pGraphicsFrame, render_pass_t* pRenderP
         pRenderPass->pNext = pGraphicsFrame->pFirstRenderPassToExecute;
         pGraphicsFrame->pFirstRenderPassToExecute = pRenderPass;
     }
-
-    if(pGraphicsFrame->pLastRenderPassToExecute == nullptr)
-    {
-        pGraphicsFrame->pLastRenderPassToExecute = pRenderPass;
-    }
-    else
-    {
-        pGraphicsFrame->pLastRenderPassToExecute->pNext = pRenderPass;
-        pGraphicsFrame->pLastRenderPassToExecute = pRenderPass;
-    }
 }
 
-vertex_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame, const upload_buffer_t* pUploadBuffer, const uint32_t uploadBufferOffset = 0u, uint32_t sizeInBytes = 0u)
+NO_DISCARD vertex_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame, const upload_buffer_t* pUploadBuffer, const uint32_t uploadBufferOffset = 0u, uint32_t sizeInBytes = 0u)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pUploadBuffer != nullptr);
@@ -2389,7 +2374,7 @@ void initializeVertexFormat(graphics_frame_t* pGraphicsFrame, vertex_format_t* p
     }
 }
 
-vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
+NO_DISCARD vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pVertexAttributes != nullptr);
@@ -2405,7 +2390,7 @@ vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame, const vert
     return vertexFormatEntry.value;
 }
 
-upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pData, const uint32_t dataSizeInBytes, upload_buffer_flags_t flags = upload_buffer_flag_none)
+NO_DISCARD upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pData, const uint32_t dataSizeInBytes, upload_buffer_flags_t flags = upload_buffer_flag_none)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(dataSizeInBytes > 0u);
@@ -2466,7 +2451,7 @@ upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, void* pDat
     return pUploadBuffer;
 }
 
-upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, const uint32_t dataSizeInBytes)
+NO_DISCARD upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame, const uint32_t dataSizeInBytes)
 {
     return createUploadBuffer(pGraphicsFrame, nullptr, dataSizeInBytes);
 }
@@ -2673,7 +2658,7 @@ void destroyShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pSha
     freeShaderBinary(pGraphicsFrame, pShaderBinary);
 }
 
-shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const shader_compilation_parameters_t* pParameters)
+NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const shader_compilation_parameters_t* pParameters)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pParameters != nullptr);
@@ -2839,7 +2824,7 @@ void resizeBackBuffer(render_context_t* pRenderContext, const uint32_t width, co
     }
 }
 
-render_context_parameters_t createDefaultRenderContextParameters(HWND pWindowHandle, const uint32_t frameBufferCount, const uint32_t windowWidth, const uint32_t windowHeight, const bool useDebugLayer)
+NO_DISCARD render_context_parameters_t createDefaultRenderContextParameters(HWND pWindowHandle, const uint32_t frameBufferCount, const uint32_t windowWidth, const uint32_t windowHeight, const bool useDebugLayer)
 {
     render_context_parameters_t parameters = {};
 

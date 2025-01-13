@@ -50,13 +50,6 @@ void draw(render_pass_t* pRenderPass, const uint32_t vertexOffset, const uint32_
 	pRenderPass->pGraphicsCommandList->DrawInstanced(vertexCount, 1u, vertexOffset, 0u);
 }
 
-void drawMesh(mesh_t* pMesh, material_t* pMaterial, render_pass_t* pRenderPass)
-{
-	bindGraphicsPipelineState(pRenderPass, pMaterial->pGraphicsPipelineState);
-	bindVertexBuffer(pRenderPass, pMesh->pVertexBuffer, pMesh->pVertexFormat, 0u);
-	draw(pRenderPass, pMesh->vertexOffset, pMesh->vertexCount);
-}
-
 void printErrorToFile(const char* p_FileName)
 {
 	DWORD errorId = GetLastError();

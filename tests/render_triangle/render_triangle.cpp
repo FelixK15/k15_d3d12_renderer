@@ -75,6 +75,13 @@ mesh_t* createSingleTriangleMesh(graphics_frame_t* pGraphicsFrame, memory_alloca
     return createMesh(pGraphicsFrame, pMemoryAllocator, triangleVertices, 3u, pVertexFormat);
 }
 
+void drawMesh(mesh_t* pMesh, material_t* pMaterial, render_pass_t* pRenderPass)
+{
+	bindGraphicsPipelineState(pRenderPass, pMaterial->pGraphicsPipelineState);
+	bindVertexBuffer(pRenderPass, pMesh->pVertexBuffer, pMesh->pVertexFormat, 0u);
+	draw(pRenderPass, pMesh->vertexOffset, pMesh->vertexCount);
+}
+
 void doFrame(test_context_frame_parameter_t* pFrameParameter)
 {
     render_triangle_test_data_t* pTestData = (render_triangle_test_data_t*)pFrameParameter->pUserData;
