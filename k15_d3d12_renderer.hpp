@@ -134,7 +134,6 @@ enum result_status_t : uint32_t
     compilation_error
 };
 
-
 template<typename T, typename BASE_TYPE>
 struct flags_t
 {
@@ -170,7 +169,6 @@ BASE_TYPE operator&(const flags_t<T, BASE_TYPE>& flags, T flag)
     return rawFlags & flag;
 }
 
-
 template<typename T>
 struct flags8_t : flags_t<T, uint8_t>
 {
@@ -205,6 +203,12 @@ struct memory_allocator_t
 {
     allocate_from_memory_allocator_fnc  allocateFnc;
     free_from_memory_allocator_fnc      freeFnc;
+};
+
+template<typename T>
+struct linked_list_node_t
+{
+    T* pNext;
 };
 
 struct d3d12_resource_t
@@ -284,7 +288,7 @@ const char* getResultString(const result_status_t result)
     return nullptr;
 }
 
-struct render_target_t
+struct render_target_t : public linked_list_node_t<render_target_t>
 {
     d3d12_resource_t            resource;
     D3D12_CPU_DESCRIPTOR_HANDLE cpuDescriptorHandle;
@@ -321,21 +325,19 @@ struct d3d12_swap_chain_t
     uint8_t                         backBufferCount;
 };
 
-struct render_pass_t
+struct render_pass_t : public linked_list_node_t<render_pass_t>
 {
     ID3D12CommandAllocator*     pGraphicsCommandAllocator;
     ID3D12GraphicsCommandList*  pGraphicsCommandList;
     const char*                 pName;
     bool                        isOpen;
     render_target_t*            pRenderTarget;
-    render_pass_t*              pNext;
 };
 
-struct graphics_pipeline_state_t
+struct graphics_pipeline_state_t : public linked_list_node_t<graphics_pipeline_state_t>
 {
     ID3D12PipelineState* pPipelineState;
     ID3D12RootSignature* pRootSignature;
-    graphics_pipeline_state_t* pNext;
 };
 
 enum upload_buffer_flags_t : uint8_t
@@ -343,12 +345,11 @@ enum upload_buffer_flags_t : uint8_t
     upload_buffer_flag_none                = 0x0
 };
 
-struct upload_buffer_t
+struct upload_buffer_t : public linked_list_node_t<upload_buffer_t>
 {
     uint32_t            sizeInBytes;
     void*               pData;
     d3d12_resource_t    bufferResource;
-    upload_buffer_t*    pNext;
 };
 
 enum class vertex_attribute_t : uint8_t
@@ -380,25 +381,22 @@ struct vertex_attribute_entry_t
     uint32_t                        count;
 };
 
-struct vertex_format_t
+struct vertex_format_t : public linked_list_node_t<vertex_format_t>
 {
     D3D12_INPUT_ELEMENT_DESC    pInputElementDescs[maxVertexAttributeCount];
     uint32_t                    inputElementCount;
-    vertex_format_t*            pNext;
 };
 
-struct vertex_buffer_t
+struct vertex_buffer_t : public linked_list_node_t<vertex_buffer_t>
 {
     d3d12_resource_t bufferResource;
     uint32_t         sizeInBytes;
-    vertex_buffer_t* pNext;
 };
 
-struct shader_binary_t
+struct shader_binary_t : public linked_list_node_t<shader_binary_t>
 {
     const uint8_t* pShaderBlob;
     uint32_t shaderBlobSizeInBytes;
-    shader_binary_t* pNext;
 };
 
 struct render_pass_parameters_t
@@ -480,13 +478,17 @@ struct render_resource_cache_t
     dynamic_array_t<vertex_buffer_t>                vertexBuffers;
     dynamic_array_t<render_pass_t>                  renderPasses;
     dynamic_array_t<render_target_t>                renderTargets;
-    hash_map_t<graphics_pipeline_state_t>           pipelineStates;
-    hash_map_t<vertex_format_t>                     vertexFormats;
-    //dynamic_array_t<graphics_pipeline_state_t>      pipelineStates;
     dynamic_array_t<upload_buffer_t>                uploadBuffers;
     dynamic_array_t<shader_binary_t>                shaderBinaries;
 
-    render_pass_t*                                  pFirstFreeRenderPass;
+    hash_map_t<graphics_pipeline_state_t>           pipelineStates;
+    hash_map_t<vertex_format_t>                     vertexFormats;
+
+    linked_list_node_t<render_pass_t>*              pFirstFreeRenderPass;
+    linked_list_node_t<vertex_buffer_t>*            pFirstFreeVertexBuffer;
+    linked_list_node_t<upload_buffer_t>*            pFirstFreeUploadBuffer;
+    linked_list_node_t<render_target_t>*            pFirstFreeRenderTarget;
+    linked_list_node_t<shader_binary_t>*            pFirstFreeShaderBinary;
 
     flags8_t<render_resource_flags_t>               flags;
 };
@@ -499,7 +501,6 @@ struct graphics_frame_t
     render_target_t*                        pBackBuffer;
     memory_allocator_t*                     pMemoryAllocator;
     render_pass_t*                          pFirstRenderPassToExecute;
-    upload_buffer_t*                        pFirstUploadBuffer;
     upload_buffer_t*                        pFirstUploadBufferToFree;
     vertex_buffer_t*                        pFirstVertexBufferToFree;
     vertex_format_t*                        pFirstVertexFormatToFree;
@@ -588,6 +589,202 @@ enum assert_result_t
 
 constexpr memory_buffer_t   emptyMemoryBuffer = {nullptr, 0u};
 
+template<typename T>
+void clearMemoryWithZeroes(T* pMemory)
+{
+    ASSERT_DEBUG(pMemory);
+    memset(pMemory, 0, sizeof(T));
+}
+
+void copyMemoryNonOverlapping(void* pDst, const void* pSrc, const uint64_t sizeInBytes)
+{
+    memcpy(pDst, pSrc, sizeInBytes);
+}
+
+void resetAllocator(memory_allocator_t* pAllocator)
+{
+    
+}
+
+void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, alloc_flags_t flags = alloc_flag_none)
+{
+    void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, defaultAllocationAlignment);
+    
+#if FORCE_CLEAR_ALLOCATIONS
+    const bool clearMemory = true;
+#else
+    const bool clearMemory = (flags & alloc_flag_clear_memory);
+#endif
+
+    if(pMemory && clearMemory)
+    {
+        memset(pMemory, 0, sizeInBytes);
+    }
+
+    return pMemory;
+}
+
+void* allocateAlignedFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, uint64_t alignmentInBytes, alloc_flags_t flags = alloc_flag_none)
+{
+    void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, alignmentInBytes);
+    
+#if FORCE_CLEAR_ALLOCATIONS
+    const bool clearMemory = true;
+#else
+    const bool clearMemory = (flags & alloc_flag_clear_memory);
+#endif
+
+    if(pMemory && clearMemory)
+    {
+        memset(pMemory, 0, sizeInBytes);
+    }
+    
+    return pMemory;
+}
+
+void freeFromAllocator(memory_allocator_t* pAllocator, void* pMemory)
+{
+    pAllocator->freeFnc(pAllocator, pMemory);
+}
+
+void* allocateFromDefaultAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, uint64_t alignmentInBytes)
+{
+    return _aligned_malloc(sizeInBytes, alignmentInBytes);
+}
+
+void freeFromDefaultAllocator(memory_allocator_t* pAllocator, void* pMemory)
+{
+    return _aligned_free(pMemory);
+}
+
+void createDefaultMemoryAllocator(memory_allocator_t* pAllocator)
+{
+    pAllocator->allocateFnc = allocateFromDefaultAllocator;
+    pAllocator->freeFnc     = freeFromDefaultAllocator;
+}
+
+template<typename T>
+void createDynamicArrayWithPreallocatedMemory(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, void* pPreallocatedMemory, const uint32_t elementCapacity)
+{
+    pOutArray->pMemoryAllocator     = pMemoryAllocator;
+    pOutArray->pData                = (T*)pPreallocatedMemory;
+    pOutArray->count                = 0u;
+    pOutArray->capacity             = elementCapacity;
+    pOutArray->elementSizeInBytes   = sizeof(T);
+}
+
+template<typename T>
+bool createDynamicArray(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, const uint32_t elementCapacity, alloc_flags_t allocationFlags)
+{
+    void* pArrayMemory = allocateFromAllocator(pMemoryAllocator, elementCapacity * sizeof(T), allocationFlags);
+    if(pArrayMemory == nullptr)
+    {
+        return false;
+    }
+
+    pOutArray->pMemoryAllocator     = pMemoryAllocator;
+    pOutArray->pData                = (T*)pArrayMemory;
+    pOutArray->count                = 0u;
+    pOutArray->capacity             = elementCapacity;
+    pOutArray->elementSizeInBytes   = sizeof(T);
+    return true;
+}
+
+template<typename T>
+bool createHashMap(hash_map_t<T>* pOutHashMap, memory_allocator_t* pMemoryAllocator, const uint32_t nodeCapacity, alloc_flags_t allocationFlags)
+{
+    const uint64_t nodeSizeInBytes = sizeof(hash_map_node_t<T>);
+    void* pFreeNodesMemory = allocateFromAllocator(pMemoryAllocator, nodeSizeInBytes * nodeCapacity, allocationFlags);
+    if(pFreeNodesMemory == nullptr)
+    {
+        return false;
+    }
+
+    void* ppBaseNodesMemory = allocateFromAllocator(pMemoryAllocator, nodeCapacity * sizeof(void*), allocationFlags);
+    if(ppBaseNodesMemory == nullptr)
+    {
+        freeFromAllocator(pMemoryAllocator, pFreeNodesMemory);
+        return false;
+    }
+
+    pOutHashMap->ppBaseNodes        = (hash_map_node_t<T>**)ppBaseNodesMemory;
+    pOutHashMap->pFreeNodes         = (hash_map_node_t<T>*)pFreeNodesMemory;
+    pOutHashMap->pMemoryAllocator   = pMemoryAllocator;
+    pOutHashMap->count              = 0u;
+    pOutHashMap->capacity           = nodeCapacity;
+
+    return true;
+}
+
+void* pushBackFromDynamicArrayDontGrow(base_dynamic_array_t* pArray, const uint32_t count)
+{
+    const uint32_t newArrayCount = pArray->count + count;
+    if(newArrayCount >= pArray->capacity)
+    {
+        return nullptr;
+    }
+
+    void* pData = (uint8_t*)pArray->pData + pArray->count * pArray->elementSizeInBytes;
+    pArray->count += count;
+
+    return pData;
+}
+
+uint32_t calculateNewDynamicArrayCapacity(const base_dynamic_array_t* pArray)
+{
+    return pArray->capacity * 2u;
+}
+
+bool tryToGrowDynamicArray(base_dynamic_array_t* pArray)
+{
+    const uint32_t newCapacity = calculateNewDynamicArrayCapacity(pArray);
+    void* pNewData = allocateFromAllocator(pArray->pMemoryAllocator, newCapacity * pArray->elementSizeInBytes);
+    if(pNewData == nullptr)
+    {
+        return false;
+    }
+
+    copyMemoryNonOverlapping(pNewData, pArray->pData, pArray->capacity * pArray->elementSizeInBytes);
+    freeFromAllocator(pArray->pMemoryAllocator, pArray->pData);
+    pArray->pData = pNewData;
+    pArray->capacity = newCapacity;
+
+    return true;
+}
+
+template<typename T>
+T* addNodesToLinkedList(linked_list_node_t<T>** ppLinkedListBase, T* pNodes, const uint32_t nodeCount)
+{
+    ASSERT_DEBUG(pNodes != nullptr);
+    ASSERT_DEBUG(nodeCount > 0u);
+
+    linked_list_node_t<T>* pFirstNode   = (linked_list_node_t<T>*)pNodes;
+    linked_list_node_t<T>* pCurrentNode = pFirstNode;
+    linked_list_node_t<T>* pNextNode    = (linked_list_node_t<T>*)((uint8_t*)pNodes + sizeof(T));
+    uint32_t nodeIndex = 0u;
+    while(true)
+    {
+        if((nodeIndex + 1) == nodeCount)
+        {
+            break;
+        }
+
+        pCurrentNode->pNext = (T*)pNextNode;
+        pCurrentNode = pNextNode;
+        pNextNode = (linked_list_node_t<T>*)((uint8_t*)pNextNode + sizeof(T));
+        ++nodeIndex;
+    }
+    
+    pCurrentNode->pNext = (T*)(*ppLinkedListBase == nullptr ? nullptr : (*ppLinkedListBase));
+    *ppLinkedListBase = pFirstNode;
+    return pNodes;
+}
+
+template<typename T>
+linked_list_node_t<T>* createLinkedList(linked_list_node_t<T>** ppFirstNode, T* pNodes, const uint32_t nodeCount)
+{
+    return addNodesToLinkedList<T>(ppFirstNode, (T*)pNodes, nodeCount);
+}
 
 D3D12_BLEND_DESC createDefaultBlendDesc()
 {
@@ -672,11 +869,6 @@ template<typename T>
 bool isInvalidResourceHandle(const T& resourceHandle)
 {
     return resourceHandle.index == invalidResourceHandleValue;
-}
-
-void copyMemoryNonOverlapping(void* pDst, const void* pSrc, const uint64_t sizeInBytes)
-{
-    memcpy(pDst, pSrc, sizeInBytes);
 }
 
 void logError(const char* pErrorFormat, ...)
@@ -793,13 +985,6 @@ void setD3D12ObjectDebugName(ID3D12Object* pObject, const char* pName)
     pObject->SetName(wideNameBuffer);
 }
 
-template<typename T>
-void clearMemoryWithZeroes(T* pMemory)
-{
-    ASSERT_DEBUG(pMemory);
-    memset(pMemory, 0, sizeof(T));
-}
-
 HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCall, const char* pFile, const uint32_t lineNumber)
 {
     if(originalResult != S_OK)
@@ -810,81 +995,28 @@ HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCal
     return originalResult;
 }
 
-void resetAllocator(memory_allocator_t* pAllocator)
+void freeVertexBuffer(graphics_frame_t* pGraphicsFrame, vertex_buffer_t* pVertexBuffer)
 {
-    
-}
-
-void* allocateFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, alloc_flags_t flags = alloc_flag_none)
-{
-    void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, defaultAllocationAlignment);
-    
-#if FORCE_CLEAR_ALLOCATIONS
-    const bool clearMemory = true;
-#else
-    const bool clearMemory = (flags & alloc_flag_clear_memory);
-#endif
-
-    if(pMemory && clearMemory)
-    {
-        memset(pMemory, 0, sizeInBytes);
-    }
-
-    return pMemory;
-}
-
-void* allocateAlignedFromAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, uint64_t alignmentInBytes, alloc_flags_t flags = alloc_flag_none)
-{
-    void* pMemory = pAllocator->allocateFnc(pAllocator, sizeInBytes, alignmentInBytes);
-    
-#if FORCE_CLEAR_ALLOCATIONS
-    const bool clearMemory = true;
-#else
-    const bool clearMemory = (flags & alloc_flag_clear_memory);
-#endif
-
-    if(pMemory && clearMemory)
-    {
-        memset(pMemory, 0, sizeInBytes);
-    }
-    
-    return pMemory;
-}
-
-void freeFromAllocator(memory_allocator_t* pAllocator, void* pMemory)
-{
-    pAllocator->freeFnc(pAllocator, pMemory);
-}
-
-void* allocateFromDefaultAllocator(memory_allocator_t* pAllocator, uint64_t sizeInBytes, uint64_t alignmentInBytes)
-{
-    return _aligned_malloc(sizeInBytes, alignmentInBytes);
-}
-
-void freeFromDefaultAllocator(memory_allocator_t* pAllocator, void* pMemory)
-{
-    return _aligned_free(pMemory);
-}
-
-void createDefaultMemoryAllocator(memory_allocator_t* pAllocator)
-{
-    pAllocator->allocateFnc = allocateFromDefaultAllocator;
-    pAllocator->freeFnc     = freeFromDefaultAllocator;
-}
-
-shader_binary_t* allocateShaderBinary(graphics_frame_t* pGraphicsFrame)
-{
-    return (shader_binary_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, sizeof(shader_binary_t));
+    COM_RELEASE(pVertexBuffer->bufferResource.pResource);
+    addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeVertexBuffer, pVertexBuffer, 1u);
 }
 
 void freeShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pShaderBinary)
 {
     freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pShaderBinary);
+    addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeShaderBinary, pShaderBinary, 1u);
 }
 
-void freeUploadBuffer(render_resource_cache_t* pRenderResourceCache, upload_buffer_t* pUploadBuffer)
+void freeUploadBuffer(graphics_frame_t* pGraphicsFrame, upload_buffer_t* pUploadBuffer)
 {
-    //TODO
+    COM_RELEASE(pUploadBuffer->bufferResource.pResource);
+    addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeUploadBuffer, pUploadBuffer, 1u);
+}
+
+void freeRenderTarget(graphics_frame_t* pGraphicsFrame, render_target_t* pRenderTarget)
+{
+    COM_RELEASE(pRenderTarget->resource.pResource);
+    addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeRenderTarget, pRenderTarget, 1u);
 }
 
 void initializeRenderTarget(render_target_t* pRenderTarget, ID3D12Resource* pRenderTargetResource, D3D12_CPU_DESCRIPTOR_HANDLE* pDescriptorHandle, D3D12_RESOURCE_STATES state)
@@ -892,11 +1024,6 @@ void initializeRenderTarget(render_target_t* pRenderTarget, ID3D12Resource* pRen
     pRenderTarget->resource.pResource       = pRenderTargetResource;
     pRenderTarget->resource.currentState    = state;
     pRenderTarget->cpuDescriptorHandle      = *pDescriptorHandle;
-}
-
-void destroyRenderTarget(render_target_t* pRenderTarget)
-{
-    COM_RELEASE(pRenderTarget->resource.pResource);
 }
 
 void resetDescriptorHeap(d3d12_descriptor_heap_t* pDescriptorHeap)
@@ -921,8 +1048,8 @@ void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, re
     render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
     while(pCurrentRenderPass != nullptr)
     {
-        render_pass_t* pNextRenderPass = pCurrentRenderPass->pNext;
-        pCurrentRenderPass->pNext = pRenderResourceCache->pFirstFreeRenderPass;
+        render_pass_t* pNextRenderPass = (render_pass_t*)pCurrentRenderPass->pNext;
+        pCurrentRenderPass->pNext = (render_pass_t*)pRenderResourceCache->pFirstFreeRenderPass;
         pRenderResourceCache->pFirstFreeRenderPass = pCurrentRenderPass;
 
         pCurrentRenderPass = pNextRenderPass;
@@ -931,38 +1058,52 @@ void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, re
 
 void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
 {
+    if(pGraphicsFrame->pFirstVertexBufferToFree != nullptr)
     {
         vertex_buffer_t* pVertexBufferToFree = pGraphicsFrame->pFirstVertexBufferToFree;
+        int vertexBufferCount = 0u;
         while(pVertexBufferToFree != nullptr)
         {
-            vertex_buffer_t* pNextVertexBuffer = pVertexBufferToFree->pNext;
+            vertex_buffer_t* pNextVertexBuffer = (vertex_buffer_t*)pVertexBufferToFree->pNext;
             COM_RELEASE(pVertexBufferToFree->bufferResource.pResource);
-            pVertexBufferToFree = pNextVertexBuffer;       
+            pVertexBufferToFree = pNextVertexBuffer;
+
+            ++vertexBufferCount;
         }
 
+        addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeVertexBuffer, pGraphicsFrame->pFirstVertexBufferToFree, vertexBufferCount);
         pGraphicsFrame->pFirstVertexBufferToFree = nullptr;
     }
 
+    if(pGraphicsFrame->pFirstUploadBufferToFree != nullptr)
     {
         upload_buffer_t* pUploadBufferToFree = pGraphicsFrame->pFirstUploadBufferToFree;
+        int uploadBufferCount = 0u;
         while(pUploadBufferToFree != nullptr)
         {
-            upload_buffer_t* pNextUploadBuffer = pUploadBufferToFree->pNext;
+            upload_buffer_t* pNextUploadBuffer = (upload_buffer_t*)pUploadBufferToFree->pNext;
             COM_RELEASE(pUploadBufferToFree->bufferResource.pResource);
             pUploadBufferToFree = pNextUploadBuffer;
+
+            ++uploadBufferCount;
         }
 
+        addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeUploadBuffer, pGraphicsFrame->pFirstUploadBufferToFree, uploadBufferCount);
         pGraphicsFrame->pFirstUploadBufferToFree = nullptr;
     }
 
+    if(pGraphicsFrame->pFirstGraphicsPipelineToFree != nullptr)
     {
         graphics_pipeline_state_t* pGraphicsPipelineStateToFree = pGraphicsFrame->pFirstGraphicsPipelineToFree;
         while(pGraphicsPipelineStateToFree != nullptr)
         {
-            graphics_pipeline_state_t* pNextGraphicsPipelineStateToFree = pGraphicsPipelineStateToFree->pNext;
+            graphics_pipeline_state_t* pNextGraphicsPipelineStateToFree = (graphics_pipeline_state_t*)pGraphicsPipelineStateToFree->pNext;
             COM_RELEASE(pGraphicsPipelineStateToFree->pPipelineState);
             COM_RELEASE(pGraphicsPipelineStateToFree->pRootSignature);
             pGraphicsPipelineStateToFree = pNextGraphicsPipelineStateToFree;
+
+            //TODO
+            //FK: Remove graphics pipeline entry from hash map
         }
 
         pGraphicsFrame->pFirstGraphicsPipelineToFree = nullptr;
@@ -1145,7 +1286,7 @@ void destroySwapChain(d3d12_swap_chain_t* pSwapChain)
     COM_RELEASE(pSwapChain->pSwapChain);
     for(uint32_t bufferIndex = 0u; bufferIndex < pSwapChain->backBufferCount; ++bufferIndex)
     {
-        destroyRenderTarget(&pSwapChain->pBackBuffers[bufferIndex]);
+        COM_RELEASE(pSwapChain->pBackBuffers[bufferIndex].resource.pResource);
     }
 
     freeFromAllocator(pSwapChain->pMemoryAllocator, pSwapChain->pBackBuffers);
@@ -1728,121 +1869,7 @@ bool createShaderCompilerContext(memory_allocator_t* pAllocator, shader_compiler
     return true;
 }
 
-template<typename T>
-void createDynamicArrayWithPreallocatedMemory(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, void* pPreallocatedMemory, const uint32_t elementCapacity)
-{
-    pOutArray->pMemoryAllocator     = pMemoryAllocator;
-    pOutArray->pData                = (T*)pPreallocatedMemory;
-    pOutArray->count                = 0u;
-    pOutArray->capacity             = elementCapacity;
-    pOutArray->elementSizeInBytes   = sizeof(T);
-}
-
-template<typename T>
-bool createDynamicArray(base_dynamic_array_t* pOutArray, memory_allocator_t* pMemoryAllocator, const uint32_t elementCapacity, alloc_flags_t allocationFlags)
-{
-    void* pArrayMemory = allocateFromAllocator(pMemoryAllocator, elementCapacity * sizeof(T), allocationFlags);
-    if(pArrayMemory == nullptr)
-    {
-        return false;
-    }
-
-    pOutArray->pMemoryAllocator     = pMemoryAllocator;
-    pOutArray->pData                = (T*)pArrayMemory;
-    pOutArray->count                = 0u;
-    pOutArray->capacity             = elementCapacity;
-    pOutArray->elementSizeInBytes   = sizeof(T);
-    return true;
-}
-
-template<typename T>
-bool createHashMap(hash_map_t<T>* pOutHashMap, memory_allocator_t* pMemoryAllocator, const uint32_t nodeCapacity, alloc_flags_t allocationFlags)
-{
-    const uint64_t nodeSizeInBytes = sizeof(hash_map_node_t<T>);
-    void* pFreeNodesMemory = allocateFromAllocator(pMemoryAllocator, nodeSizeInBytes * nodeCapacity, allocationFlags);
-    if(pFreeNodesMemory == nullptr)
-    {
-        return false;
-    }
-
-    void* ppBaseNodesMemory = allocateFromAllocator(pMemoryAllocator, nodeCapacity * sizeof(void*), allocationFlags);
-    if(ppBaseNodesMemory == nullptr)
-    {
-        freeFromAllocator(pMemoryAllocator, pFreeNodesMemory);
-        return false;
-    }
-
-    pOutHashMap->ppBaseNodes        = (hash_map_node_t<T>**)ppBaseNodesMemory;
-    pOutHashMap->pFreeNodes         = (hash_map_node_t<T>*)pFreeNodesMemory;
-    pOutHashMap->pMemoryAllocator   = pMemoryAllocator;
-    pOutHashMap->count              = 0u;
-    pOutHashMap->capacity           = nodeCapacity;
-
-    return true;
-}
-
-void* pushBackFromDynamicArrayDontGrow(base_dynamic_array_t* pArray, const uint32_t count)
-{
-    const uint32_t newArrayCount = pArray->count + count;
-    if(newArrayCount >= pArray->capacity)
-    {
-        return nullptr;
-    }
-
-    void* pData = (uint8_t*)pArray->pData + pArray->count * pArray->elementSizeInBytes;
-    pArray->count += count;
-
-    return pData;
-}
-
-uint32_t calculateNewDynamicArrayCapacity(const base_dynamic_array_t* pArray)
-{
-    return pArray->capacity * 2u;
-}
-
-bool tryToGrowDynamicArray(base_dynamic_array_t* pArray)
-{
-    const uint32_t newCapacity = calculateNewDynamicArrayCapacity(pArray);
-    void* pNewData = allocateFromAllocator(pArray->pMemoryAllocator, newCapacity * pArray->elementSizeInBytes);
-    if(pNewData == nullptr)
-    {
-        return false;
-    }
-
-    copyMemoryNonOverlapping(pNewData, pArray->pData, pArray->capacity * pArray->elementSizeInBytes);
-    freeFromAllocator(pArray->pMemoryAllocator, pArray->pData);
-    pArray->pData = pNewData;
-    pArray->capacity = newCapacity;
-
-    return true;
-}
-
-render_pass_t* createRenderPassChain(render_pass_t* pRenderPasses, const uint32_t renderPassCount)
-{
-    ASSERT_DEBUG(pRenderPasses != nullptr);
-    ASSERT_DEBUG(renderPassCount > 0u);
-
-    render_pass_t* pCurrentRenderPass = pRenderPasses;
-    render_pass_t* pNextRenderPass = pRenderPasses + 1;
-    uint32_t renderPassIndex = 0u;
-    while(true)
-    {
-        if((renderPassIndex + 1) == renderPassCount)
-        {
-            pCurrentRenderPass->pNext = nullptr;
-            break;
-        }
-
-        pCurrentRenderPass->pNext = pNextRenderPass;
-        pCurrentRenderPass = pNextRenderPass;
-        pNextRenderPass = pNextRenderPass + 1;
-        ++renderPassIndex;
-    }
-
-    return pRenderPasses;
-}
-
-bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPassInChain)
+bool initRenderPasses(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPassInChain)
 {   
     uint32_t renderPassIndex = 0u;
     char renderPassDebugNameBuffer[] = "render_pass_graphics_command_allocator_______";
@@ -1865,7 +1892,7 @@ bool initRenderPassChain(D3D12DeviceType* pDevice, render_pass_t* pFirstRenderPa
         sprintf(renderPassDebugNameBuffer, "render_pass_graphics_command_list_%u", renderPassIndex);
         setD3D12ObjectDebugName(pCurrentRenderPass->pGraphicsCommandList, renderPassDebugNameBuffer);    
 
-        pCurrentRenderPass = pCurrentRenderPass->pNext;
+        pCurrentRenderPass = (render_pass_t*)pCurrentRenderPass->pNext;
         ++renderPassIndex;
     }
 
@@ -1902,11 +1929,12 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
 
     uint64_t offsetInBytes = 0u;
     bool renderResourceCacheAllocationFailed = false;
-    renderResourceCacheAllocationFailed |= !createDynamicArray<vertex_buffer_t>(&pOutRenderResourceCache->vertexBuffers, pMemoryAllocator, pLimits->maxVertexBufferCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createHashMap<vertex_format_t>(&pOutRenderResourceCache->vertexFormats, pMemoryAllocator, pLimits->maxVertexFormatCount, alloc_flag_clear_memory);
+    renderResourceCacheAllocationFailed |= !createHashMap<graphics_pipeline_state_t>(&pOutRenderResourceCache->pipelineStates, pMemoryAllocator, pLimits->maxPipelineStateCount, alloc_flag_clear_memory);
+
+    renderResourceCacheAllocationFailed |= !createDynamicArray<vertex_buffer_t>(&pOutRenderResourceCache->vertexBuffers, pMemoryAllocator, pLimits->maxVertexBufferCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pLimits->maxShaderBinaryCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pLimits->maxRenderTargetCount, alloc_flag_clear_memory);
-    renderResourceCacheAllocationFailed |= !createHashMap<graphics_pipeline_state_t>(&pOutRenderResourceCache->pipelineStates, pMemoryAllocator, pLimits->maxPipelineStateCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<upload_buffer_t>(&pOutRenderResourceCache->uploadBuffers, pMemoryAllocator, pLimits->maxUploadBufferCount, alloc_flag_clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<render_pass_t>(&pOutRenderResourceCache->renderPasses, pMemoryAllocator, pLimits->maxRenderPassCount, alloc_flag_clear_memory);
 
@@ -1916,8 +1944,13 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
         return false;
     }
 
-    pOutRenderResourceCache->pFirstFreeRenderPass = createRenderPassChain((render_pass_t*)pOutRenderResourceCache->renderPasses.pData, pOutRenderResourceCache->renderPasses.capacity);
-    if(!initRenderPassChain(pDevice, pOutRenderResourceCache->pFirstFreeRenderPass))
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderPass, (render_pass_t*)pOutRenderResourceCache->renderPasses.pData, pOutRenderResourceCache->renderPasses.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeUploadBuffer, (upload_buffer_t*)pOutRenderResourceCache->uploadBuffers.pData, pOutRenderResourceCache->uploadBuffers.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderTarget, (render_target_t*)pOutRenderResourceCache->renderTargets.pData, pOutRenderResourceCache->renderTargets.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeVertexBuffer, (vertex_buffer_t*)pOutRenderResourceCache->vertexBuffers.pData, pOutRenderResourceCache->vertexBuffers.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeShaderBinary, (shader_binary_t*)pOutRenderResourceCache->shaderBinaries.pData, pOutRenderResourceCache->shaderBinaries.capacity);
+
+    if(!initRenderPasses(pDevice, (render_pass_t*)pOutRenderResourceCache->pFirstFreeRenderPass))
     {
         return false;
     }
@@ -2050,7 +2083,7 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
     while(pRenderPass)
     {
         pRenderContext->pDefaultDirectCommandQueue->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pRenderPass->pGraphicsCommandList);
-        pRenderPass = pRenderPass->pNext;
+        pRenderPass = (render_pass_t*)pRenderPass->pNext;
     }
 
     COM_CALL(pRenderContext->swapChain.pSwapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING));
@@ -2061,47 +2094,52 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
     pRenderContext->pCurrentGraphicsFrame = nullptr;
 }
 
-void* allocateFromRenderResourceCacheGeneric(base_dynamic_array_t* pResourceArray, const bool notifyOnGrow, const char* pResourceName)
+template<typename T>
+T* getFreeObjectFromFreeList(linked_list_node_t<T>** ppFreeList, dynamic_array_t<T>* pBackupStorage, const flags8_t<render_resource_flags_t> flags, const char* pObjectName)
 {
-    void* pRenderResourceData = pushBackFromDynamicArrayDontGrow(pResourceArray, 1u);
-    if(pRenderResourceData == nullptr)
+    if((*ppFreeList) == nullptr)
     {
-        if(notifyOnGrow)
+        if(flags & render_resource_flags_t::notify_on_array_grow)
         {
-            logWarning("Reached limit of %u %s. Need to allocate from main memory to make room for more %s, new limit = %u", pResourceArray->capacity, pResourceName, calculateNewDynamicArrayCapacity(pResourceArray), pResourceName);
-        }
+            printf("Warning: free list for '%s' ran out of space, growing backing storage.\n", pObjectName);
 
-        if(!tryToGrowDynamicArray(pResourceArray))
-        {
-            return nullptr;
-        }
+            const uint32_t oldCapacity = pBackupStorage->capacity;
+            T* pNodesToAdd = (T*)pBackupStorage->pData + pBackupStorage->capacity;
+            if(!tryToGrowDynamicArray(pBackupStorage))
+            {
+                printf("Error: could not grow backing storage for '%s'.\n", pObjectName);
+                return nullptr;
+            }
 
-        pRenderResourceData = pushBackFromDynamicArrayDontGrow(pResourceArray, 1u);
-        if(pRenderResourceData == nullptr)
-        {
-            return nullptr;
+            const uint32_t newCapacity = pBackupStorage->capacity;
+            const uint32_t nodesToAdd = newCapacity - oldCapacity;
+            *ppFreeList = addNodesToLinkedList(ppFreeList, pNodesToAdd, nodesToAdd);
         }
     }
 
-    return pRenderResourceData;
+    linked_list_node_t<T>* pFreeObject = *ppFreeList;
+    *ppFreeList = (linked_list_node_t<T>*)pFreeObject->pNext;
+    return (T*)pFreeObject;
 }
 
-shader_binary_t* allocateShaderBinary(render_resource_cache_t* pRenderResourceCache)
+shader_binary_t* getFreeShaderBinary(render_resource_cache_t* pRenderResourceCache)
 {
-    return (shader_binary_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "shader binaries");
+    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeShaderBinary, &pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags, "Shader Binaries");
 }
 
 render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
 {
-    ASSERT_DEBUG(pRenderResourceCache->pFirstFreeRenderPass != nullptr);
-    render_pass_t* pFreeRenderPass = pRenderResourceCache->pFirstFreeRenderPass;
-    pRenderResourceCache->pFirstFreeRenderPass = pFreeRenderPass->pNext;
-    return pFreeRenderPass;
+    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeRenderPass, &pRenderResourceCache->renderPasses, pRenderResourceCache->flags, "Render Passes");
 }
 
-upload_buffer_t* allocateUploadBuffer(render_resource_cache_t* pRenderResourceCache)
+upload_buffer_t* getFreeUploadBuffer(render_resource_cache_t* pRenderResourceCache)
 {
-    return (upload_buffer_t*)allocateFromRenderResourceCacheGeneric(&pRenderResourceCache->uploadBuffers, pRenderResourceCache->flags & render_resource_flags_t::notify_on_array_grow, "upload buffers");
+    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeUploadBuffer, &pRenderResourceCache->uploadBuffers, pRenderResourceCache->flags, "Upload Buffer");
+}
+
+vertex_buffer_t* getFreeVertexBuffer(render_resource_cache_t* pRenderResourceCache)
+{
+    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeVertexBuffer, &pRenderResourceCache->vertexBuffers, pRenderResourceCache->flags, "Vertex Buffer");
 }
 
 NO_DISCARD render_pass_t* startRenderPass(graphics_frame_t* pGraphicsFrame, const char* pRenderPassName, render_target_t* pRenderTarget)
@@ -2307,22 +2345,14 @@ NO_DISCARD vertex_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame,
     pVertexBuffer->bufferResource.currentState = D3D12_RESOURCE_STATE_COMMON;
     pVertexBuffer->sizeInBytes = sizeInBytes;
 
-    #if 1
     transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
     pGraphicsFrame->pFrameGeneralGraphicsQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->bufferResource.pResource, uploadBufferOffset, sizeInBytes);
     transitionResource(pGraphicsFrame->pFrameGeneralGraphicsQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-    #else
-    transitionResource(pGraphicsFrame->pFrameGeneralCopyQueue, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
-    pGraphicsFrame->pFrameGeneralCopyQueue->CopyBufferRegion(pVertexBuffer->bufferResource.pResource, 0u, pUploadBuffer->pBufferResource->pResource, pUploadBuffer->startStagingBufferByteIndex, bufferSizeInBytes);
-    #endif
-
     return pVertexBuffer;
 }
 
 void releaseUploadBuffer(graphics_frame_t* pGraphicsFrame, upload_buffer_t* pUploadBuffer)
 {
-    ASSERT_DEBUG(pUploadBuffer->pNext == nullptr);
-
     upload_buffer_t* pPrevUploadBuffer = pGraphicsFrame->pFirstUploadBufferToFree;
     pUploadBuffer->pNext = pPrevUploadBuffer;
     pGraphicsFrame->pFirstUploadBufferToFree = pUploadBuffer;
@@ -2330,8 +2360,6 @@ void releaseUploadBuffer(graphics_frame_t* pGraphicsFrame, upload_buffer_t* pUpl
 
 void releaseVertexBuffer(graphics_frame_t* pGraphicsFrame, vertex_buffer_t* pVertexBuffer)
 {
-    ASSERT_DEBUG(pVertexBuffer->pNext == nullptr);
-
     vertex_buffer_t* pPrevVertexBuffer = pGraphicsFrame->pFirstVertexBufferToFree;
     pVertexBuffer->pNext = pPrevVertexBuffer;
     pGraphicsFrame->pFirstVertexBufferToFree = pVertexBuffer;
@@ -2417,7 +2445,7 @@ NO_DISCARD upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame,
         return nullptr;
     }
 
-    upload_buffer_t* pUploadBuffer = allocateUploadBuffer(pGraphicsFrame->pRenderResourceCache);
+    upload_buffer_t* pUploadBuffer = getFreeUploadBuffer(pGraphicsFrame->pRenderResourceCache);
     if(pUploadBuffer == nullptr)
     {
         pResource->Release();
@@ -2431,7 +2459,7 @@ NO_DISCARD upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame,
     if(COM_CALL(pResource->Map(0, &mapRange, &pUploadBufferData)) != S_OK)
     {
         pResource->Release();
-        freeUploadBuffer(pGraphicsFrame->pRenderResourceCache, pUploadBuffer);
+        freeUploadBuffer(pGraphicsFrame, pUploadBuffer);
         return nullptr;
     }
 
@@ -2444,9 +2472,6 @@ NO_DISCARD upload_buffer_t* createUploadBuffer(graphics_frame_t* pGraphicsFrame,
     pUploadBuffer->pData                        = pUploadBufferData;
     pUploadBuffer->bufferResource.pResource     = pResource;
     pUploadBuffer->bufferResource.currentState  = D3D12_RESOURCE_STATE_GENERIC_READ;
-
-    pUploadBuffer->pNext = pGraphicsFrame->pFirstUploadBuffer;
-    pGraphicsFrame->pFirstUploadBuffer = pUploadBuffer;
     
     return pUploadBuffer;
 }
@@ -2655,7 +2680,7 @@ void destroyShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pSha
     ASSERT_DEBUG(pShaderBinary != nullptr);
 
     freeFromAllocator(pGraphicsFrame->pMemoryAllocator, (void*)pShaderBinary->pShaderBlob);
-    freeShaderBinary(pGraphicsFrame, pShaderBinary);
+    addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeShaderBinary, pShaderBinary, 1u);
 }
 
 NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const shader_compilation_parameters_t* pParameters)
@@ -2750,9 +2775,10 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
     memcpy(pShaderBlobCopy, pCompileShaderBlob->GetBufferPointer(), pCompileShaderBlob->GetBufferSize());
     pCompileShaderBlob->Release();
 
-    shader_binary_t* pShaderBinary = allocateShaderBinary(pGraphicsFrame->pRenderResourceCache);
+    shader_binary_t* pShaderBinary = getFreeShaderBinary(pGraphicsFrame->pRenderResourceCache);
     if(pShaderBinary == nullptr)
     {
+        freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pShaderBlobCopy);
         return nullptr;
     }
 
@@ -2803,7 +2829,7 @@ void resizeBackBuffer(render_context_t* pRenderContext, const uint32_t width, co
 
     for(uint32_t bufferIndex = 0u; bufferIndex < pRenderContext->swapChain.backBufferCount; ++bufferIndex)
     {
-        destroyRenderTarget(&pRenderContext->swapChain.pBackBuffers[bufferIndex]);
+        COM_RELEASE(pRenderContext->swapChain.pBackBuffers[bufferIndex].resource.pResource);
     }
 
     pRenderContext->swapChain.pSwapChain->ResizeBuffers(0u, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
