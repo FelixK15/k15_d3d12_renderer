@@ -1,7 +1,7 @@
 struct VertexInput
 {
-    float3 pos : POSITION;
-    float4 color : COLOR;
+    float4 pos : POSITION;
+    float3 color : COLOR;
 };
 
 struct VertexOutput
@@ -13,7 +13,7 @@ struct VertexOutput
 VertexOutput main(VertexInput vertexInput)
 {
     VertexOutput output;
-    output.pos = float4(vertexInput.pos, 1.0f);
-    output.color = vertexInput.color;
+    output.pos = vertexInput.pos;
+    output.color = float4(vertexInput.color, 1.0f);
     return output;
 }

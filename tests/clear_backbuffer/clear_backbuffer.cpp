@@ -27,11 +27,11 @@ int CALLBACK WinMain(HINSTANCE hInstance,
     parameters.useDebugLayer = true;
     parameters.pFrameCallback = doFrame;
 
-    result_t<test_context_t> testContextResult = initTestEnvironmentAndWindow(hInstance, 1024, 768, "[DX12] clear backbuffer", &parameters);
+    result_t<test_context_t*> testContextResult = initTestEnvironmentAndWindow(hInstance, 1024, 768, "[DX12] clear backbuffer", &parameters);
     if(!isResultSuccessful(testContextResult))
     {
         return -1;
     }
 
-    return startTest(&testContextResult.value);
+    return startTest(testContextResult.value);
 }
