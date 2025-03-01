@@ -37,25 +37,8 @@ void doFrame(test_context_frame_parameter_t* pFrameParameter)
     render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pGraphicsFrame->pBackBuffer);
     clearColorRenderTarget(pRenderPass, pFrameParameter->pGraphicsFrame->pBackBuffer, 0.0f, 0.0f, 0.0f, 1.0f);
     
-    if(pRenderPass->state.scissor.width > 2000)
-    {
-        DebugBreak();
-    }
-
     bindGraphicsPipeline(pRenderPass, pTestData->pMaterial->pGraphicsPipeline);
-
-    if(pRenderPass->state.scissor.width > 2000)
-    {
-        DebugBreak();
-    }
-
     bindConstantBuffer(pRenderPass, pTestData->pSpinningCubeConstantBuffer, 0u);
-
-    if(pRenderPass->state.scissor.width > 2000)
-    {
-        DebugBreak();
-    }
-
     drawIndexedMesh(pRenderPass, pTestData->pMesh, pTestData->pMaterial);
 
     endRenderPass(pFrameParameter->pGraphicsFrame, pRenderPass);   
