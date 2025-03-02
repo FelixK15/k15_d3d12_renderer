@@ -289,10 +289,17 @@ struct linked_list_node_t
     T* pNext;
 };
 
+struct d3d12_descriptor_handle
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuDescriptorHandle;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuDescriptorHandle;
+};
+
 struct d3d12_resource_t
 {
-    ID3D12Resource* pResource;
-    D3D12_RESOURCE_STATES currentState;
+    ID3D12Resource*             pResource;
+    d3d12_descriptor_handle     descriptorHandle;
+    D3D12_RESOURCE_STATES       currentState;
 };
 
 struct buffer_slice_t
@@ -412,7 +419,7 @@ enum class gpu_memory_usage_hint_t : uint8_t
 enum class gpu_texture_format_t : uint8_t
 {
     R8,
-    R8B8G8A8,
+    R8G8B8A8,
     R16,
     R16G16,
     R16G16B16A16,
@@ -462,14 +469,21 @@ enum gpu_texture_format_type_flag_t : uint8_t
     all_except_floating_point   = all & (~floating_point)
 };
 
+enum class gpu_buffer_usage_flag_t : uint8_t
+{
+    none = 0,
+    shader_accessible
+};
+
 struct gpu_buffer_t : public linked_list_node_t<gpu_buffer_t>
 {
-    flags8_t<gpu_buffer_flag_t>     flags;
-    gpu_memory_usage_hint_t         memoryUsageHint;
-    gpu_buffer_usage_t              bufferUsage;
-    d3d12_resource_t                bufferResource;
-    uint32_t                        sizeInBytes;
-    const char*                     pName;
+    flags8_t<gpu_buffer_flag_t>         flags;
+    flags8_t<gpu_buffer_usage_flag_t>   usageFlags;
+    gpu_memory_usage_hint_t             memoryUsageHint;
+    gpu_buffer_usage_t                  bufferUsage;
+    d3d12_resource_t                    resource;
+    uint32_t                            sizeInBytes;
+    const char*                         pName;
 };
 
 struct gpu_texture_t : public linked_list_node_t<gpu_texture_t>
@@ -482,6 +496,42 @@ struct gpu_texture_t : public linked_list_node_t<gpu_texture_t>
     gpu_memory_usage_hint_t         memoryUsageHint;
     uint32_t                        sizeInBytes;
     const char*                     pName;
+};
+
+enum class texture_sampler_filter_type_t : uint8_t
+{
+    point,
+    linear,
+    anisotropic
+};
+
+enum class texture_sampler_address_mode_type_t : uint8_t
+{
+    wrap,
+    mirror,
+    clamp,
+    border
+};
+
+struct texture_sampler_parameter_t
+{
+    texture_sampler_filter_type_t       mipmapFilter;
+    texture_sampler_filter_type_t       minifactionFilter;
+    texture_sampler_filter_type_t       magnificationFilter;
+    texture_sampler_address_mode_type_t addressModeU;
+    texture_sampler_address_mode_type_t addressModeV;
+    texture_sampler_address_mode_type_t addressModeW;
+};
+
+struct texture_sampler_t : public linked_list_node_t<texture_sampler_t>
+{
+    d3d12_descriptor_handle     descriptorHandle;
+    texture_sampler_filter_type_t       mipmapFilter;
+    texture_sampler_filter_type_t       minifactionFilter;
+    texture_sampler_filter_type_t       magnificationFilter;
+    texture_sampler_address_mode_type_t addressModeU;
+    texture_sampler_address_mode_type_t addressModeV;
+    texture_sampler_address_mode_type_t addressModeW;
 };
 
 struct d3d12_descriptor_heap_t
@@ -546,14 +596,16 @@ struct graphics_pipeline_t : public linked_list_node_t<graphics_pipeline_t>
 
 enum class bound_resource_type_t : uint8_t
 {
-    constant_buffer
+    constant_buffer,
+    texture,
+    sampler
 };
 
 struct bound_resource_t
 {
-    bound_resource_type_t type;
-    d3d12_resource_t* pResource;
-    uint16_t index;
+    d3d12_descriptor_handle     descriptorHandle;
+    bound_resource_type_t       type;
+    uint16_t                    index;
 };
 
 struct render_state_t
@@ -581,6 +633,8 @@ enum class vertex_attribute_t : uint8_t
 {
     position,
     color,
+    normal,
+    texcoord,
     count
 };
 
@@ -718,6 +772,7 @@ struct render_resource_cache_t
     dynamic_array_t<render_pass_t>                  renderPasses;
     dynamic_array_t<render_target_t>                renderTargets;
     dynamic_array_t<shader_binary_t>                shaderBinaries;
+    dynamic_array_t<texture_sampler_t>                      sampler;
 
     hash_map_t<graphics_pipeline_t>                 graphicPipelines;
     hash_map_t<vertex_format_t>                     vertexFormats;
@@ -727,6 +782,7 @@ struct render_resource_cache_t
     linked_list_node_t<gpu_texture_t>*              pFirstFreeGpuTexture;
     linked_list_node_t<render_target_t>*            pFirstFreeRenderTarget;
     linked_list_node_t<shader_binary_t>*            pFirstFreeShaderBinary;
+    linked_list_node_t<texture_sampler_t>*                  pFirstFreeSampler;
 
     flags8_t<render_resource_flags_t>               flags;
 };
@@ -744,6 +800,10 @@ struct graphics_frame_t
     gpu_texture_t*                          pFirstGpuTextureToFree;
     vertex_format_t*                        pFirstVertexFormatToFree;
     graphics_pipeline_t*                    pFirstGraphicsPipelineToFree;
+    texture_sampler_t*                      pFirstSamplerToFree;
+
+    d3d12_descriptor_heap_t*                pShaderVisibleDescriptorHeap;
+    d3d12_descriptor_heap_t*                pSamplerDescriptorHeap;
 
 #if USE_VALIDATION
     gpu_buffer_t*                           pFirstMappedGpuBuffer;
@@ -768,8 +828,9 @@ struct graphics_frame_collection_t
 
 struct graphics_frame_parameters_t
 {
-    uint32_t        maxRenderPassCount;
-    uint32_t        defaultStagingBufferSizeInBytes;
+    uint32_t                    maxRenderPassCount;
+    d3d12_descriptor_heap_t*    pShaderDescriptorHeap;
+    d3d12_descriptor_heap_t*    pSamplerDescriptorHeap;
 };
 
 struct render_context_t
@@ -778,8 +839,11 @@ struct render_context_t
     D3D12DebugType*             pDebugLayer;
     DXGIFactoryType*            pFactory;
 
-    render_resource_cache_t     renderResourceCache;
+    d3d12_descriptor_heap_t     shaderVisibleDescriptorHeap;
+    d3d12_descriptor_heap_t     samplerDescriptorHeap;
+
     shader_compiler_context_t   shaderCompilerContext;
+    render_resource_cache_t     renderResourceCache;
     memory_allocator_t          defaultAllocator;
     graphics_frame_collection_t graphicsFramesCollection;
     const graphics_frame_t*     pCurrentGraphicsFrame;
@@ -1362,6 +1426,17 @@ D3D12_CPU_DESCRIPTOR_HANDLE getNextCPUDescriptorHandle(d3d12_descriptor_heap_t* 
     return cpuHandle;
 }
 
+D3D12_GPU_DESCRIPTOR_HANDLE getNextGPUDescriptorHandle(d3d12_descriptor_heap_t* pDescriptorHeap)
+{
+    ASSERT_DEBUG(pDescriptorHeap->pGPUCurrent != nullptr);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle = {};
+    gpuHandle.ptr = (size_t)pDescriptorHeap->pGPUCurrent;
+    pDescriptorHeap->pGPUCurrent += pDescriptorHeap->incrementSizeInBytes;
+
+    return gpuHandle;
+}
+
 void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, render_pass_t* pFirstRenderPassInChain)
 {
     render_pass_t* pCurrentRenderPass = pFirstRenderPassInChain;
@@ -1384,7 +1459,7 @@ void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
         while(pGpuBufferToFree != nullptr)
         {
             gpu_buffer_t* pNextGpuBuffer = (gpu_buffer_t*)pGpuBufferToFree->pNext;
-            COM_RELEASE(pGpuBufferToFree->bufferResource.pResource);
+            COM_RELEASE(pGpuBufferToFree->resource.pResource);
             ZeroMemory(pGpuBufferToFree, sizeof(gpu_buffer_t));
 
             pGpuBufferToFree = pNextGpuBuffer;
@@ -1584,30 +1659,37 @@ void destroyDescriptorHeap(d3d12_descriptor_heap_t* pDescriptorHeap)
     clearMemoryWithZeroes(pDescriptorHeap);
 }
 
-bool createDescriptorHeap(d3d12_descriptor_heap_t* pOutDescriptorHeap, D3D12DeviceType* pDevice, D3D12_DESCRIPTOR_HEAP_TYPE type, const uint32_t descriptorCount )
+bool createDescriptorHeap(d3d12_descriptor_heap_t* pOutDescriptorHeap, D3D12DeviceType* pDevice, D3D12_DESCRIPTOR_HEAP_TYPE type, D3D12_DESCRIPTOR_HEAP_FLAGS flags, const uint32_t descriptorCount )
 {
     ID3D12DescriptorHeap* pDescriptorHeap = nullptr;
     D3D12_DESCRIPTOR_HEAP_DESC descriptorHeapDesc = {};
     descriptorHeapDesc.Type             = type;
     descriptorHeapDesc.NumDescriptors   = descriptorCount;
-    descriptorHeapDesc.Flags            = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    descriptorHeapDesc.Flags            = flags;
     if(COM_CALL(pDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&pDescriptorHeap))) != S_OK)
     {
         return false;
     }
 
-    const uint64_t cpuDescriptorHeapStartAddress = pDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr;
-    const uint64_t gpuDescriptorHeapStartAddress = pDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr;
     const uint64_t incrementSizeInBytes = pDevice->GetDescriptorHandleIncrementSize(type);
+    const uint64_t cpuDescriptorHeapStartAddress = pDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr;
 
-    pOutDescriptorHeap->incrementSizeInBytes = incrementSizeInBytes;
-    pOutDescriptorHeap->pCPUBaseAddress = (const uint8_t*)cpuDescriptorHeapStartAddress;
-    pOutDescriptorHeap->pGPUBaseAddress = (const uint8_t*)gpuDescriptorHeapStartAddress;
-    pOutDescriptorHeap->pCPUCurrent = (uint8_t*)cpuDescriptorHeapStartAddress;
-    pOutDescriptorHeap->pGPUCurrent = (uint8_t*)gpuDescriptorHeapStartAddress;
-    pOutDescriptorHeap->pCPUEndAddress = (const uint8_t*)cpuDescriptorHeapStartAddress + incrementSizeInBytes * descriptorCount;
-    pOutDescriptorHeap->pGPUEndAddress = (const uint8_t*)gpuDescriptorHeapStartAddress + incrementSizeInBytes * descriptorCount;
-    pOutDescriptorHeap->pDescriptorHeap = pDescriptorHeap;
+    pOutDescriptorHeap->incrementSizeInBytes    = incrementSizeInBytes;
+    pOutDescriptorHeap->pCPUBaseAddress         = (const uint8_t*)cpuDescriptorHeapStartAddress;
+    pOutDescriptorHeap->pCPUCurrent             = (uint8_t*)cpuDescriptorHeapStartAddress;
+    pOutDescriptorHeap->pCPUEndAddress          = (const uint8_t*)cpuDescriptorHeapStartAddress + incrementSizeInBytes * descriptorCount;
+    pOutDescriptorHeap->pDescriptorHeap         = pDescriptorHeap;
+    pOutDescriptorHeap->pGPUBaseAddress         = nullptr;
+    pOutDescriptorHeap->pGPUCurrent             = nullptr;
+    pOutDescriptorHeap->pGPUEndAddress          = nullptr;
+
+    if(flags == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
+    {
+        const uint64_t gpuDescriptorHeapStartAddress = pDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr;
+        pOutDescriptorHeap->pGPUBaseAddress = (const uint8_t*)gpuDescriptorHeapStartAddress;
+        pOutDescriptorHeap->pGPUCurrent     = (uint8_t*)gpuDescriptorHeapStartAddress;
+        pOutDescriptorHeap->pGPUEndAddress  = (const uint8_t*)gpuDescriptorHeapStartAddress + incrementSizeInBytes * descriptorCount;
+    }
     return true;
 }
 
@@ -1644,7 +1726,7 @@ bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pMem
 
     com_auto_release_t<IDXGISwapChain1> pTempSwapChain = nullptr;
     
-    if(!createDescriptorHeap(&swapChain.backBufferRenderTargetDescriptorHeap, pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, frameBufferCount))
+    if(!createDescriptorHeap(&swapChain.backBufferRenderTargetDescriptorHeap, pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, frameBufferCount))
     {
         goto cleanup_and_exit_failure;
     }
@@ -1693,7 +1775,7 @@ bool createSwapChain(d3d12_swap_chain_t* pOutSwapChain, memory_allocator_t* pMem
 
 int mapFormatTypeOffset(const gpu_texture_format_type_t formatType, const flags8_t<gpu_texture_format_type_flag_t> supportedTypeFlags)
 {
-    gpu_texture_format_type_flag_t formatTypeFlag = (gpu_texture_format_type_flag_t)(1u << (uint8_t)formatType);
+    gpu_texture_format_type_flag_t formatTypeFlag = (gpu_texture_format_type_flag_t)(1u << ((uint8_t)formatType + 1u));
     ASSERT_DEBUG(!supportedTypeFlags.isFlagSet(formatTypeFlag));
 
     const uint64_t formatTypeMask = (uint64_t)formatTypeFlag - 1ull;
@@ -1711,7 +1793,7 @@ DXGI_FORMAT mapTextureFormatToD3D12Format(gpu_texture_format_t format, gpu_textu
     {
         case gpu_texture_format_t::R8:
             return mapFormatRange(DXGI_FORMAT_R8_TYPELESS, formatType, gpu_texture_format_type_flag_t::all_except_floating_point);
-        case gpu_texture_format_t::R8B8G8A8:
+        case gpu_texture_format_t::R8G8B8A8:
             return mapFormatRange(DXGI_FORMAT_R8G8B8A8_TYPELESS, formatType, gpu_texture_format_type_flag_t::all_except_floating_point);
         case gpu_texture_format_t::R16:
             return mapFormatRange(DXGI_FORMAT_R16_TYPELESS, formatType, gpu_texture_format_type_flag_t::typeless | gpu_texture_format_type_flag_t::floating_point);
@@ -1906,7 +1988,7 @@ void removeEntryFromHashMap(hash_map_t<T>* pHashMap, const hash_map_entry_t<T*>*
 
 const char* getVertexAttributeSemanticBaseName(const vertex_attribute_t attribute)
 {
-    static_assert((uint32_t)vertex_attribute_t::count == 2u);
+    static_assert((uint32_t)vertex_attribute_t::count == 4u);
 
     switch(attribute)
     {
@@ -1914,6 +1996,10 @@ const char* getVertexAttributeSemanticBaseName(const vertex_attribute_t attribut
             return "COLOR";
         case vertex_attribute_t::position:
             return "POSITION";
+        case vertex_attribute_t::normal:
+            return "NORMAL";
+        case vertex_attribute_t::texcoord:
+            return "TEXCOORD";
     }
 
     ASSERT_DEBUG_UNREACHABLE_CODE();
@@ -1990,62 +2076,126 @@ D3D12_ROOT_PARAMETER_TYPE mapBindingPointTypeToRootParameterType(const shader_bi
         case shader_binding_point_type_t::constant_buffer:
             return D3D12_ROOT_PARAMETER_TYPE_CBV;
         case shader_binding_point_type_t::texture:
-            return D3D12_ROOT_PARAMETER_TYPE_SRV;
+        case shader_binding_point_type_t::sampler:
+            return D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     }
 
     DebugBreak();
     return D3D12_ROOT_PARAMETER_TYPE_CBV;
 }
 
-void addVertexShaderRootParameter(dynamic_array_t<D3D12_ROOT_PARAMETER>* pRootParameters, const shader_binary_t* pShaderBinary)
+D3D12_DESCRIPTOR_RANGE_TYPE mapBindingPointTypeToDescriptorRangeType(const shader_binding_point_type_t bindingPointType)
+{
+    switch(bindingPointType)
+    {
+        case shader_binding_point_type_t::constant_buffer:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case shader_binding_point_type_t::sampler:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        case shader_binding_point_type_t::texture:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    }
+
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+}
+
+bool tryToCreateRootParameter(D3D12_ROOT_PARAMETER* pOutRootParameter, const shader_binding_point_t* pBindingPoint, memory_allocator_t* pMemoryAllocator, D3D12_SHADER_VISIBILITY shaderVisibility)
+{
+    D3D12_ROOT_PARAMETER rootParameter = {};
+    rootParameter.ParameterType = mapBindingPointTypeToRootParameterType(pBindingPoint);
+    rootParameter.ShaderVisibility = shaderVisibility;
+
+    if(rootParameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+    {
+        D3D12_DESCRIPTOR_RANGE* pDescriptorRange = (D3D12_DESCRIPTOR_RANGE*)allocateFromAllocator(pMemoryAllocator, sizeof(D3D12_DESCRIPTOR_RANGE), alloc_flags_t::clear_memory);
+        if(pDescriptorRange == nullptr)
+        {
+            return false;
+        }
+
+        pDescriptorRange->BaseShaderRegister    = pBindingPoint->slot;
+        pDescriptorRange->RegisterSpace         = pBindingPoint->space;
+        pDescriptorRange->RangeType             = mapBindingPointTypeToDescriptorRangeType(pBindingPoint->type);
+        pDescriptorRange->NumDescriptors        = 1;
+
+        rootParameter.DescriptorTable.NumDescriptorRanges   = 1;
+        rootParameter.DescriptorTable.pDescriptorRanges     = pDescriptorRange;
+    }
+    else if(rootParameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+            rootParameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+            rootParameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV)
+    {
+        rootParameter.Descriptor.RegisterSpace  = pBindingPoint->space;
+        rootParameter.Descriptor.ShaderRegister = pBindingPoint->slot;
+    }
+    else
+    {
+        ASSERT_DEBUG_UNREACHABLE_CODE();
+    }
+
+    *pOutRootParameter = rootParameter;
+    return true;
+}
+
+bool addVertexShaderRootParameter(dynamic_array_t<D3D12_ROOT_PARAMETER>* pRootParameters, memory_allocator_t* pMemoryAllocator, const shader_binary_t* pShaderBinary)
 {
     if(pShaderBinary == nullptr || pShaderBinary->bindingPointCount == 0u)
     {
-        return;
+        return false;
     }
     
     D3D12_ROOT_PARAMETER* pRootParameterData = (D3D12_ROOT_PARAMETER*)pushBackFromDynamicArrayDontGrow(pRootParameters, pShaderBinary->bindingPointCount);
     for(uint32_t bindingPointIndex = 0u; bindingPointIndex < pShaderBinary->bindingPointCount; ++bindingPointIndex )
     {
-        D3D12_ROOT_PARAMETER rootParameter = {};
-        pRootParameterData[bindingPointIndex].ParameterType = mapBindingPointTypeToRootParameterType(&pShaderBinary->bindingPoints[bindingPointIndex]);
-        pRootParameterData[bindingPointIndex].Descriptor.RegisterSpace = pShaderBinary->bindingPoints[bindingPointIndex].space;
-        pRootParameterData[bindingPointIndex].Descriptor.RegisterSpace = pShaderBinary->bindingPoints[bindingPointIndex].slot;
-        pRootParameterData[bindingPointIndex].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        if(!tryToCreateRootParameter(&pRootParameterData[bindingPointIndex], &pShaderBinary->bindingPoints[bindingPointIndex], pMemoryAllocator, D3D12_SHADER_VISIBILITY_VERTEX))
+        {
+            return false;
+        }
     }
+
+    return true;
 }
 
-void addPixelShaderRootParameter(dynamic_array_t<D3D12_ROOT_PARAMETER>* pRootParameters, const shader_binary_t* pShaderBinary)
+bool addPixelShaderRootParameter(dynamic_array_t<D3D12_ROOT_PARAMETER>* pRootParameters, memory_allocator_t* pMemoryAllocator, const shader_binary_t* pShaderBinary)
 {
-     if(pShaderBinary == nullptr || pShaderBinary->bindingPointCount == 0u)
+    if(pShaderBinary == nullptr || pShaderBinary->bindingPointCount == 0u)
     {
-        return;
+        return false;
     }
     
     D3D12_ROOT_PARAMETER* pRootParameterData = (D3D12_ROOT_PARAMETER*)pushBackFromDynamicArrayDontGrow(pRootParameters, pShaderBinary->bindingPointCount);
     for(uint32_t bindingPointIndex = 0u; bindingPointIndex < pShaderBinary->bindingPointCount; ++bindingPointIndex )
     {
-        D3D12_ROOT_PARAMETER rootParameter = {};
-        pRootParameterData[bindingPointIndex].ParameterType = mapBindingPointTypeToRootParameterType(&pShaderBinary->bindingPoints[bindingPointIndex]);
-        pRootParameterData[bindingPointIndex].Descriptor.RegisterSpace = pShaderBinary->bindingPoints[bindingPointIndex].space;
-        pRootParameterData[bindingPointIndex].Descriptor.RegisterSpace = pShaderBinary->bindingPoints[bindingPointIndex].slot;
-        pRootParameterData[bindingPointIndex].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        if(!tryToCreateRootParameter(&pRootParameterData[bindingPointIndex], &pShaderBinary->bindingPoints[bindingPointIndex], pMemoryAllocator, D3D12_SHADER_VISIBILITY_PIXEL))
+        {
+            return false;
+        }
     }
+
+    return true;
 }
 
 bool fillRootSignature(memory_allocator_t* pMemoryAllocator, D3D12_ROOT_SIGNATURE_DESC* pOutRootSignature, const graphics_pipeline_parameters_t* pPipelineParameters)
 {
     D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
     rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
+    
     dynamic_array_t<D3D12_ROOT_PARAMETER> rootParameters;
     if(!createDynamicArray<D3D12_ROOT_PARAMETER>(&rootParameters, pMemoryAllocator, 24u, alloc_flags_t::clear_memory))
     {
         return false;
     }
 
-    addVertexShaderRootParameter(&rootParameters, pPipelineParameters->pVertexShader);
-    addPixelShaderRootParameter(&rootParameters, pPipelineParameters->pPixelShader);
+    if(!addVertexShaderRootParameter(&rootParameters, pMemoryAllocator, pPipelineParameters->pVertexShader))
+    {
+        return false;
+    }
+
+    if(!addPixelShaderRootParameter(&rootParameters, pMemoryAllocator, pPipelineParameters->pPixelShader))
+    {
+        return false;
+    }
     
     rootSignatureDesc.NumParameters = rootParameters.count;
     rootSignatureDesc.pParameters = (D3D12_ROOT_PARAMETER*)rootParameters.pData;
@@ -2112,9 +2262,18 @@ NO_DISCARD graphics_pipeline_t* createGraphicsPipeline(graphics_frame_t* pGraphi
         return nullptr;
     }
 
-    ID3DBlob* pRootSignatureBlob = nullptr;
-    ID3DBlob* pErrorBlob = nullptr;
-    D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &pRootSignatureBlob, &pErrorBlob);
+    ComPtr<ID3DBlob> pRootSignatureBlob = nullptr;
+    ComPtr<ID3DBlob> pErrorBlob = nullptr;
+    if(COM_CALL(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &pRootSignatureBlob, &pErrorBlob)) != S_OK)
+    {
+        if(pErrorBlob != nullptr)
+        {
+            const char* pError = (const char*)pErrorBlob->GetBufferPointer();
+            logError(pError);
+        }
+        return nullptr;
+    }
+
     ID3D12RootSignature* pRootSignature = nullptr;
     COM_CALL(pGraphicsFrame->pDevice->CreateRootSignature(0u, pRootSignatureBlob->GetBufferPointer(), pRootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&pRootSignature)));
 
@@ -2195,6 +2354,8 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
     graphicsFrame.pFrameFinishedEvent = CreateEvent(nullptr, TRUE, TRUE, "");
     graphicsFrame.pShaderCompilerContext = pShaderCompilerContext;
     graphicsFrame.pRenderResourceCache = pRenderResourceCache;
+    graphicsFrame.pShaderVisibleDescriptorHeap = pGraphicsFrameParameters->pShaderDescriptorHeap;
+    graphicsFrame.pSamplerDescriptorHeap = pGraphicsFrameParameters->pSamplerDescriptorHeap;
 
     if(graphicsFrame.pFrameFinishedEvent == nullptr)
     {
@@ -2291,7 +2452,7 @@ struct render_context_parameters_t
         uint32_t                        maxRenderPassCount;
         uint32_t                        maxRenderTargetCount;
         uint32_t                        maxPipelineStateCount;
-        uint32_t                        defaultStagingBufferSizeInBytes;
+        uint32_t                        maxSamplerCount;
     } limits;
 };
 
@@ -2438,7 +2599,7 @@ bool areAllGpuBuffersReleased(dynamic_array_t<gpu_buffer_t>* pGpuBuffers)
     bool foundLeakedResources = false;
     for(uint32_t bufferIndex = 0u; bufferIndex < pGpuBuffers->capacity; ++bufferIndex)
     {
-        if(pBaseGpuBuffer[bufferIndex].bufferResource.pResource != nullptr)
+        if(pBaseGpuBuffer[bufferIndex].resource.pResource != nullptr)
         {
             logWarning("GPU buffer '%s' leaked.", pBaseGpuBuffer[bufferIndex].pName);
             foundLeakedResources = true;
@@ -2493,6 +2654,7 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
     renderResourceCacheAllocationFailed |= !createDynamicArray<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pLimits->maxShaderBinaryCount, clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pLimits->maxRenderTargetCount, clear_memory);
     renderResourceCacheAllocationFailed |= !createDynamicArray<render_pass_t>(&pOutRenderResourceCache->renderPasses, pMemoryAllocator, pLimits->maxRenderPassCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createDynamicArray<texture_sampler_t>(&pOutRenderResourceCache->sampler, pMemoryAllocator, pLimits->maxSamplerCount, clear_memory);
 
     if(renderResourceCacheAllocationFailed)
     {
@@ -2503,7 +2665,9 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
     createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderPass, (render_pass_t*)pOutRenderResourceCache->renderPasses.pData, pOutRenderResourceCache->renderPasses.capacity);
     createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderTarget, (render_target_t*)pOutRenderResourceCache->renderTargets.pData, pOutRenderResourceCache->renderTargets.capacity);
     createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuBuffer, (gpu_buffer_t*)pOutRenderResourceCache->gpuBuffers.pData, pOutRenderResourceCache->gpuBuffers.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuTexture, (gpu_texture_t*)pOutRenderResourceCache->gpuTextures.pData, pOutRenderResourceCache->gpuTextures.capacity);
     createLinkedList(&pOutRenderResourceCache->pFirstFreeShaderBinary, (shader_binary_t*)pOutRenderResourceCache->shaderBinaries.pData, pOutRenderResourceCache->shaderBinaries.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeSampler, (texture_sampler_t*)pOutRenderResourceCache->sampler.pData, pOutRenderResourceCache->sampler.capacity);
 
     if(!initRenderPasses(pDevice, (render_pass_t*)pOutRenderResourceCache->pFirstFreeRenderPass))
     {
@@ -2564,9 +2728,22 @@ bool createRenderContext(render_context_t* pRenderContext, const render_context_
         return false;
     }
 
+    //FK: Assume every GpuBuffer is accessed by compute
+    const uint32_t numDescriptors = pParameters->limits.maxGpuTextureCount + pParameters->limits.maxRenderTargetCount + pParameters->limits.maxGpuBufferCount;
+    if(!createDescriptorHeap(&pRenderContext->shaderVisibleDescriptorHeap, pRenderContext->pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, numDescriptors))
+    {
+        return false;
+    }
+
+    if(!createDescriptorHeap(&pRenderContext->samplerDescriptorHeap, pRenderContext->pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, pParameters->limits.maxSamplerCount))
+    {
+        return false;
+    }
+
     graphics_frame_parameters_t graphicsFrameParameters = {};
-    graphicsFrameParameters.maxRenderPassCount              = pParameters->limits.maxRenderPassCount;
-    graphicsFrameParameters.defaultStagingBufferSizeInBytes = pParameters->limits.defaultStagingBufferSizeInBytes;
+    graphicsFrameParameters.maxRenderPassCount      = pParameters->limits.maxRenderPassCount;
+    graphicsFrameParameters.pShaderDescriptorHeap   = &pRenderContext->shaderVisibleDescriptorHeap;
+    graphicsFrameParameters.pSamplerDescriptorHeap  = &pRenderContext->samplerDescriptorHeap;
     if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &graphicsFrameParameters, &pRenderContext->defaultAllocator, &pRenderContext->renderResourceCache, &pRenderContext->shaderCompilerContext, pRenderContext->pDevice, pParameters->frameBufferCount))
     {
         return false;
@@ -2610,9 +2787,7 @@ NO_DISCARD graphics_frame_t* beginNextFrame(render_context_t* pRenderContext)
     ASSERT_DEBUG(pRenderContext != nullptr);
     ASSERT_DEBUG(pRenderContext->pCurrentGraphicsFrame == nullptr);
 
-    const uint64_t previousFrameIndex = (pRenderContext->frameIndex - 1) % pRenderContext->graphicsFramesCollection.frameCount;
     const uint64_t frameIndex = pRenderContext->frameIndex % pRenderContext->graphicsFramesCollection.frameCount;
-
     graphics_frame_t* pGraphicsFrame = getGraphicsFrameFromGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, frameIndex);
     
     flushFrame(pGraphicsFrame);
@@ -2697,12 +2872,20 @@ render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
 
 gpu_texture_t* getFreeGpuTexture(render_resource_cache_t* pRenderResourceCache)
 {
-    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTexture, &pRenderResourceCache->gpuTextures, pRenderResourceCache->flags, "Gpu Texture");
+    gpu_texture_t* pGpuTexture = getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTexture, &pRenderResourceCache->gpuTextures, pRenderResourceCache->flags, "Gpu Textures");
+    ASSERT_DEBUG(pGpuTexture != nullptr);
+    ASSERT_DEBUG((pGpuTexture->flags & gpu_texture_flag_t::marked_as_free) == 0);
+    return pGpuTexture;
+}
+
+texture_sampler_t* getFreeSampler(render_resource_cache_t* pRenderResourceCache)
+{
+    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeSampler, &pRenderResourceCache->sampler, pRenderResourceCache->flags, "Samplers");
 }
 
 gpu_buffer_t* getFreeGpuBuffer(render_resource_cache_t* pRenderResourceCache)
 {
-    gpu_buffer_t* pGpuBuffer = getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuBuffer, &pRenderResourceCache->gpuBuffers, pRenderResourceCache->flags, "Gpu Buffer");
+    gpu_buffer_t* pGpuBuffer = getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuBuffer, &pRenderResourceCache->gpuBuffers, pRenderResourceCache->flags, "Gpu Buffers");
     ASSERT_DEBUG(pGpuBuffer != nullptr);
     ASSERT_DEBUG((pGpuBuffer->flags & gpu_buffer_flag_t::marked_as_free) == 0);
     return pGpuBuffer;
@@ -2798,6 +2981,7 @@ uint32_t getDXGIFormatSizeInBytes(const DXGI_FORMAT format)
     case DXGI_FORMAT_R32G32_FLOAT:
     case DXGI_FORMAT_R32G32_UINT:
     case DXGI_FORMAT_R32G32_SINT:
+        return 8;
     case DXGI_FORMAT_R10G10B10A2_UNORM:
     case DXGI_FORMAT_R10G10B10A2_UINT:
     case DXGI_FORMAT_R11G11B10_FLOAT:
@@ -2854,10 +3038,10 @@ void bindVertexBuffer(render_pass_t* pRenderPass, gpu_buffer_t* pVertexBuffer, c
         return;
     }
 
-    transitionResource(pRenderPass->pGraphicsCommandList, &pVertexBuffer->bufferResource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    transitionResource(pRenderPass->pGraphicsCommandList, &pVertexBuffer->resource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
 
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView = {};
-    vertexBufferView.BufferLocation = pVertexBuffer->bufferResource.pResource->GetGPUVirtualAddress();
+    vertexBufferView.BufferLocation = pVertexBuffer->resource.pResource->GetGPUVirtualAddress();
     vertexBufferView.SizeInBytes    = pVertexBuffer->sizeInBytes;
     vertexBufferView.StrideInBytes  = calculateVertexStrideSizeInBytes(pVertexFormat);
     pRenderPass->pGraphicsCommandList->IASetVertexBuffers(slotIndex, 1u, &vertexBufferView);
@@ -2872,18 +3056,18 @@ void bindIndexBuffer(render_pass_t* pRenderPass, gpu_buffer_t* pIndexBuffer, con
         return;
     }
 
-    transitionResource(pRenderPass->pGraphicsCommandList, &pIndexBuffer->bufferResource, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+    transitionResource(pRenderPass->pGraphicsCommandList, &pIndexBuffer->resource, D3D12_RESOURCE_STATE_INDEX_BUFFER);
 
     const DXGI_FORMAT dxgiIndexFormat = (indexFormat == index_format_t::unsigned_int_16bit ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT);
 
     D3D12_INDEX_BUFFER_VIEW indexBufferView = {};
-    indexBufferView.BufferLocation  = pIndexBuffer->bufferResource.pResource->GetGPUVirtualAddress();
+    indexBufferView.BufferLocation  = pIndexBuffer->resource.pResource->GetGPUVirtualAddress();
     indexBufferView.Format          = dxgiIndexFormat;
     indexBufferView.SizeInBytes     = pIndexBuffer->sizeInBytes;
     pRenderPass->pGraphicsCommandList->IASetIndexBuffer(&indexBufferView);
 }
 
-void bindConstantBuffer(render_pass_t* pRenderPass, gpu_buffer_t* pConstantBuffer, uint32_t rootParameterIndex)
+void bindConstantBuffer(render_pass_t* pRenderPass, gpu_buffer_t* pConstantBuffer, uint32_t index)
 {
     ASSERT_DEBUG(pRenderPass != nullptr);
     ASSERT_DEBUG(pConstantBuffer != nullptr);
@@ -2895,9 +3079,35 @@ void bindConstantBuffer(render_pass_t* pRenderPass, gpu_buffer_t* pConstantBuffe
     ASSERT_DEBUG(pRenderPass->state.boundResourceCount < sizeof(pRenderPass->state.boundResources) / sizeof(pRenderPass->state.boundResources[0]));
 
     const uint32_t boundResourceIndex = pRenderPass->state.boundResourceCount++;
-    pRenderPass->state.boundResources[boundResourceIndex].type      = bound_resource_type_t::constant_buffer;
-    pRenderPass->state.boundResources[boundResourceIndex].index     = rootParameterIndex;
-    pRenderPass->state.boundResources[boundResourceIndex].pResource = &pConstantBuffer->bufferResource;
+    pRenderPass->state.boundResources[boundResourceIndex].type              = bound_resource_type_t::constant_buffer;
+    pRenderPass->state.boundResources[boundResourceIndex].index             = index;
+    pRenderPass->state.boundResources[boundResourceIndex].descriptorHandle  = pConstantBuffer->resource.descriptorHandle;
+}
+
+void bindTexture(render_pass_t* pRenderPass, gpu_texture_t* pTexture, uint32_t index)
+{
+    ASSERT_DEBUG(pRenderPass != nullptr);
+    ASSERT_DEBUG(pTexture != nullptr);
+
+    ASSERT_DEBUG(pRenderPass->state.boundResourceCount < sizeof(pRenderPass->state.boundResources) / sizeof(pRenderPass->state.boundResources[0]));
+
+    const uint32_t boundResourceIndex = pRenderPass->state.boundResourceCount++;
+    pRenderPass->state.boundResources[boundResourceIndex].type              = bound_resource_type_t::texture;
+    pRenderPass->state.boundResources[boundResourceIndex].index             = index;
+    pRenderPass->state.boundResources[boundResourceIndex].descriptorHandle  = pTexture->resource.descriptorHandle;
+}
+
+void bindTextureSampler(render_pass_t* pRenderPass, texture_sampler_t* pSampler, uint32_t index)
+{
+    ASSERT_DEBUG(pRenderPass != nullptr);
+    ASSERT_DEBUG(pSampler != nullptr);
+
+    ASSERT_DEBUG(pRenderPass->state.boundResourceCount < sizeof(pRenderPass->state.boundResources) / sizeof(pRenderPass->state.boundResources[0]));
+
+    const uint32_t boundResourceIndex = pRenderPass->state.boundResourceCount++;
+    pRenderPass->state.boundResources[boundResourceIndex].type              = bound_resource_type_t::sampler;
+    pRenderPass->state.boundResources[boundResourceIndex].index             = index;
+    pRenderPass->state.boundResources[boundResourceIndex].descriptorHandle  = pSampler->descriptorHandle;
 }
 
 void bindGraphicsPipeline(render_pass_t* pRenderPass, graphics_pipeline_t* pGraphicsPipeline)
@@ -2974,15 +3184,45 @@ void applyScissor(ID3D12GraphicsCommandList* pGraphicsCommandList, render_state_
 
 void applyBoundBufferResources(ID3D12GraphicsCommandList* pGraphicsCommandList, render_state_t* pRenderPassState, const bound_resource_t* pBoundResources, const uint32_t boundResourceCount)
 {
+    if(memcmp(pRenderPassState->boundResources, pBoundResources, sizeof(bound_resource_t) * boundResourceCount) == 0) 
+    {
+        return;
+    }
+
+    pRenderPassState->boundResourceCount = boundResourceCount;
+
     for(uint32_t boundResourceIndex = 0u; boundResourceIndex < boundResourceCount; ++boundResourceIndex)
     {
-        if(pBoundResources[boundResourceIndex].type == bound_resource_type_t::constant_buffer)
+        if(memcmp(&pRenderPassState->boundResources[boundResourceIndex], &pBoundResources[boundResourceIndex], sizeof(bound_resource_t)) == 0)
         {
-            transitionResource(pGraphicsCommandList, pBoundResources[boundResourceIndex].pResource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-            pGraphicsCommandList->SetGraphicsRootConstantBufferView(pBoundResources[boundResourceIndex].index, pBoundResources[boundResourceIndex].pResource->pResource->GetGPUVirtualAddress());
             continue;
         }
+
+        if(pBoundResources[boundResourceIndex].type == bound_resource_type_t::constant_buffer)
+        {
+            //transitionResource(pGraphicsCommandList, pBoundResources[boundResourceIndex].pResource, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = (D3D12_GPU_VIRTUAL_ADDRESS)pBoundResources[boundResourceIndex].descriptorHandle.gpuDescriptorHandle.ptr;
+            pGraphicsCommandList->SetGraphicsRootConstantBufferView(0, gpuAddress);
+            continue;
+        }
+        else if(pBoundResources[boundResourceIndex].type == bound_resource_type_t::texture)
+        {
+            //transitionResource(pGraphicsCommandList, pBoundResources[boundResourceIndex].pResource, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            pGraphicsCommandList->SetGraphicsRootDescriptorTable(2, pBoundResources[boundResourceIndex].descriptorHandle.gpuDescriptorHandle);
+            continue;
+        }
+        else if(pBoundResources[boundResourceIndex].type == bound_resource_type_t::sampler)
+        {
+            pGraphicsCommandList->SetGraphicsRootDescriptorTable(1, pBoundResources[boundResourceIndex].descriptorHandle.gpuDescriptorHandle);
+            continue;
+        }
+        else
+        {
+            ASSERT_DEBUG_UNREACHABLE_CODE();
+        }
     }
+
+    memcpy(pRenderPassState->boundResources, pBoundResources, sizeof(bound_resource_t) * boundResourceCount);
 }
 
 void applyRenderState(ID3D12GraphicsCommandList* pGraphicsCommandList, graphics_frame_t* pGraphicsFrame, render_state_t* pRenderPassState)
@@ -2990,6 +3230,12 @@ void applyRenderState(ID3D12GraphicsCommandList* pGraphicsCommandList, graphics_
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
     ASSERT_DEBUG(pRenderPassState != nullptr);
     ASSERT_DEBUG(pGraphicsCommandList != nullptr);
+
+    ID3D12DescriptorHeap* descriptorHeaps[] = {
+        pGraphicsFrame->pSamplerDescriptorHeap->pDescriptorHeap,
+        pGraphicsFrame->pShaderVisibleDescriptorHeap->pDescriptorHeap
+    };
+    pGraphicsCommandList->SetDescriptorHeaps(2u, descriptorHeaps);
 
     applyViewport(pGraphicsCommandList, &pGraphicsFrame->renderState, &pRenderPassState->viewport);
     applyScissor(pGraphicsCommandList, &pGraphicsFrame->renderState, &pRenderPassState->scissor);
@@ -3157,7 +3403,7 @@ uint32_t getSizeInBytesOfTextureFormat(const gpu_texture_format_t format)
             return 1u;
         case gpu_texture_format_t::R16:
             return 2u;
-        case gpu_texture_format_t::R8B8G8A8:
+        case gpu_texture_format_t::R8G8B8A8:
         case gpu_texture_format_t::R16G16:
         case gpu_texture_format_t::R32:
         case gpu_texture_format_t::R10G10B10A2:
@@ -3243,6 +3489,37 @@ void copyGpuTexture(graphics_frame_t* pGraphicsFrame, gpu_texture_t* pDestinatio
     pGraphicsFrame->pFrameGeneralGraphicsCommandList->CopyTextureRegion(&destinationCopyLocation, 0u, 0u, 0u, &sourceCopyLocation, nullptr);
 }
 
+void copyGpuTextureFromBuffer(graphics_frame_t* pGraphicsFrame, gpu_texture_t* pDestinationTexture, gpu_buffer_t* pSourceBuffer)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pDestinationTexture != nullptr);
+    ASSERT_DEBUG(pSourceBuffer != nullptr);
+
+    if(!Validate(pDestinationTexture->sizeInBytes == pSourceBuffer->sizeInBytes, "Trying to copy source buffer '%s' into destination texture '%s' but they don't have the same size.", pSourceBuffer->pName, pDestinationTexture->pName))
+    {
+        return;
+    }
+
+    const uint32_t bufferSizeInBytes = pSourceBuffer->sizeInBytes;
+
+    D3D12_TEXTURE_COPY_LOCATION sourceCopyLocation = {};
+    sourceCopyLocation.pResource = pSourceBuffer->resource.pResource;
+    sourceCopyLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    sourceCopyLocation.PlacedFootprint.Footprint.Depth      = pDestinationTexture->dimensions.z;
+    sourceCopyLocation.PlacedFootprint.Footprint.Height     = pDestinationTexture->dimensions.y;
+    sourceCopyLocation.PlacedFootprint.Footprint.Width      = pDestinationTexture->dimensions.x;
+    sourceCopyLocation.PlacedFootprint.Footprint.RowPitch   = getSizeInBytesOfTextureFormat(pDestinationTexture->format) * pDestinationTexture->dimensions.x;
+    sourceCopyLocation.PlacedFootprint.Footprint.Format     = mapTextureFormatToD3D12Format(pDestinationTexture->format, pDestinationTexture->formatType);
+
+    D3D12_TEXTURE_COPY_LOCATION destinationCopyLocation = {};
+    destinationCopyLocation.pResource = pDestinationTexture->resource.pResource;
+    destinationCopyLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+    transitionResource(pGraphicsFrame->pFrameGeneralGraphicsCommandList, &pDestinationTexture->resource, D3D12_RESOURCE_STATE_COPY_DEST);
+    transitionResource(pGraphicsFrame->pFrameGeneralGraphicsCommandList, &pSourceBuffer->resource, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    pGraphicsFrame->pFrameGeneralGraphicsCommandList->CopyTextureRegion(&destinationCopyLocation, 0u, 0u, 0u, &sourceCopyLocation, nullptr);
+}
+
 void copyGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pDestinationBuffer, gpu_buffer_t* pSourceBuffer)
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
@@ -3255,98 +3532,77 @@ void copyGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pDestinationB
     }
 
     const uint32_t bufferSizeInBytes = pSourceBuffer->sizeInBytes;
-    //transitionResource(pGraphicsFrame->pFrameGeneralGraphicsCommandList, &pDestinationBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
-    //transitionResource(pGraphicsFrame->pFrameGeneralGraphicsCommandList, &pSourceBuffer->bufferResource, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    pGraphicsFrame->pFrameGeneralGraphicsCommandList->CopyBufferRegion(pDestinationBuffer->bufferResource.pResource, 0u, pSourceBuffer->bufferResource.pResource, 0u, bufferSizeInBytes);
+    pGraphicsFrame->pFrameGeneralGraphicsCommandList->CopyBufferRegion(pDestinationBuffer->resource.pResource, 0u, pSourceBuffer->resource.pResource, 0u, bufferSizeInBytes);
 }
 
-NO_DISCARD gpu_texture_t* createGpuTexture(graphics_frame_t* pGraphicsFrame, uint3_t dimensions, const void* pInitialData, gpu_texture_format_t format, gpu_texture_format_type_t formatType, gpu_memory_usage_hint_t memoryUsageHint, flags8_t<gpu_texture_flag_t> flags, const uint8_t mipMapLevels, const char* pName = "GpuTexture")
+D3D12_FILTER_TYPE mapSamplerFilterTypeToD3D12SamplerFilterType(const texture_sampler_filter_type_t filterType)
 {
-    ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(!(dimensions.x == 0 && dimensions.y == 0 && dimensions.z == 0));
-
-    D3D12_RESOURCE_DIMENSION resourceDimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
-    if(dimensions.y > 0u && dimensions.z == 0u)
+    switch(filterType)
     {
-        resourceDimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    }
-    if(dimensions.y > 0u && dimensions.z > 0u)
-    {
-        resourceDimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        case texture_sampler_filter_type_t::point:
+            return D3D12_FILTER_TYPE_POINT;
+        case texture_sampler_filter_type_t::linear:
+            return D3D12_FILTER_TYPE_LINEAR;
     }
 
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension          = resourceDimension;
-    desc.Alignment          = 0u;
-    desc.Format             = mapTextureFormatToD3D12Format(format, formatType);
-    desc.DepthOrArraySize   = dimensions.z == 0u ? 1u : dimensions.z;
-    desc.Height             = dimensions.y == 0u ? 1u : dimensions.y;
-    desc.Width              = dimensions.x;
-    desc.MipLevels          = mipMapLevels == 0u ? 1u : mipMapLevels;
-    desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    desc.SampleDesc.Count   = 1u;
-    desc.SampleDesc.Quality = 0u;
-    
-    D3D12_HEAP_PROPERTIES heapProperties = {};
-    heapProperties.Type                 = mapGpuMemoryHintToHeapType(memoryUsageHint);
-    heapProperties.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    
-    com_auto_release_t<ID3D12Resource> pGpuTextureResource = nullptr;
-    if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, IID_PPV_ARGS(&pGpuTextureResource))) != S_OK)
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return D3D12_FILTER_TYPE_POINT;
+}
+
+D3D12_TEXTURE_ADDRESS_MODE mapTextureAddressModeToD3D12TextureAddressMode(const texture_sampler_address_mode_type_t addressModeType)
+{
+    switch(addressModeType)
+    {
+        case texture_sampler_address_mode_type_t::border:
+            return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        case texture_sampler_address_mode_type_t::clamp:
+            return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        case texture_sampler_address_mode_type_t::mirror:
+            return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        case texture_sampler_address_mode_type_t::wrap:
+            return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    }
+
+    ASSERT_DEBUG_UNREACHABLE_CODE();
+    return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+}
+
+D3D12_FILTER mapSamplerFilterToD3D12SamplerFilter(const texture_sampler_filter_type_t minifactionFilter, const texture_sampler_filter_type_t magnificationFilter, const texture_sampler_filter_type_t mipmapFilter)
+{
+    const D3D12_FILTER_TYPE minFilter = mapSamplerFilterTypeToD3D12SamplerFilterType(minifactionFilter);
+    const D3D12_FILTER_TYPE magFilter = mapSamplerFilterTypeToD3D12SamplerFilterType(magnificationFilter);
+    const D3D12_FILTER_TYPE mipFilter = mapSamplerFilterTypeToD3D12SamplerFilterType(mipmapFilter);
+    return D3D12_ENCODE_BASIC_FILTER(minFilter, magFilter, mipFilter, D3D12_FILTER_REDUCTION_TYPE_STANDARD);
+}
+
+NO_DISCARD texture_sampler_t* createTextureSampler(graphics_frame_t* pGraphicsFrame, const texture_sampler_parameter_t* pParameter)
+{
+    texture_sampler_t* pSampler = getFreeSampler(pGraphicsFrame->pRenderResourceCache);
+    if(pSampler == nullptr)
     {
         return nullptr;
     }
 
-    gpu_texture_t* pGpuTexture = getFreeGpuTexture(pGraphicsFrame->pRenderResourceCache);
-    if(pGpuTexture == nullptr)
-    {
-        return nullptr;
-    }
+    D3D12_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = mapSamplerFilterToD3D12SamplerFilter(pParameter->minifactionFilter, pParameter->magnificationFilter, pParameter->mipmapFilter);
+    samplerDesc.AddressU = mapTextureAddressModeToD3D12TextureAddressMode(pParameter->addressModeU);
+    samplerDesc.AddressV = mapTextureAddressModeToD3D12TextureAddressMode(pParameter->addressModeV);
+    samplerDesc.AddressW = mapTextureAddressModeToD3D12TextureAddressMode(pParameter->addressModeW);
+    //samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
 
-    pGpuTexture->resource.pResource     = pGpuTextureResource.pPointer;
-    pGpuTexture->resource.currentState  = D3D12_RESOURCE_STATE_COMMON;
-    pGpuTexture->dimensions             = dimensions;
-    pGpuTexture->format                 = format;
-    pGpuTexture->formatType             = formatType;
-    pGpuTexture->flags                  = flags;
-    pGpuTexture->memoryUsageHint        = memoryUsageHint;
-    pGpuTexture->pName                  = pName;
+    D3D12_CPU_DESCRIPTOR_HANDLE samplerDescriptorHandle = getNextCPUDescriptorHandle(pGraphicsFrame->pSamplerDescriptorHeap);
+    pGraphicsFrame->pDevice->CreateSampler(&samplerDesc, samplerDescriptorHandle);
 
-    const uint32_t sizeInBytes = calculateTextureDataSizeInBytesRecursive(0u, dimensions, format, mipMapLevels);
-    if(pInitialData != nullptr)
-    {
-        bool useStagingBuffer = ( memoryUsageHint == gpu_memory_usage_hint_t::gpuExclusiveAccess );
-        if(memoryUsageHint != gpu_memory_usage_hint_t::gpuExclusiveAccess)
-        {
-            void* pGpuTextureData = nullptr;
-            if(COM_CALL(pGpuTextureResource->Map(0u, nullptr, &pGpuTextureData)) != S_OK)
-            {
-                useStagingBuffer = true;
-            }
-            else
-            {
-                memcpy(pGpuTextureData, pInitialData, sizeInBytes);
-                pGpuTextureResource->Unmap(0u, nullptr);
-            }
-        }
+    pSampler->descriptorHandle.cpuDescriptorHandle  = samplerDescriptorHandle;
+    pSampler->descriptorHandle.gpuDescriptorHandle  = getNextGPUDescriptorHandle(pGraphicsFrame->pSamplerDescriptorHeap);
+    pSampler->minifactionFilter                     = pParameter->minifactionFilter;
+    pSampler->magnificationFilter                   = pParameter->magnificationFilter;
+    pSampler->mipmapFilter                          = pParameter->mipmapFilter;
+    pSampler->addressModeU                          = pParameter->addressModeU;
+    pSampler->addressModeV                          = pParameter->addressModeV;
+    pSampler->addressModeW                          = pParameter->addressModeW;
 
-        if(useStagingBuffer)
-        {
-            gpu_texture_t* pStagingTexture = createGpuTexture(pGraphicsFrame, dimensions, pInitialData, format, formatType, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, flags, mipMapLevels, "Staging Texture");
-            if(pStagingTexture == nullptr)
-            {
-                return nullptr;
-            }
-
-            copyGpuTexture(pGraphicsFrame, pGpuTexture, pStagingTexture);
-            freeGpuTexture(pGraphicsFrame, pStagingTexture);
-        }   
-    }
-
-    setD3D12ObjectDebugName(pGpuTexture->resource.pResource, pGpuTexture->pName);
-    pGpuTextureResource.takeOwnership();
-    return pGpuTexture;
+    return pSampler;
 }
 
 NO_DISCARD gpu_buffer_t* createGpuBuffer(graphics_frame_t* pGraphicsFrame, uint32_t sizeInBytes, const void* pInitialData, gpu_buffer_usage_t bufferUsage, gpu_memory_usage_hint_t memoryUsageHint, const char* pName = "GpuBuffer")
@@ -3382,12 +3638,23 @@ NO_DISCARD gpu_buffer_t* createGpuBuffer(graphics_frame_t* pGraphicsFrame, uint3
         return nullptr;
     }
 
-    pGpuBuffer->bufferResource.pResource    = pGpuBufferResource.pPointer;
-    pGpuBuffer->bufferResource.currentState = D3D12_RESOURCE_STATE_COMMON;
-    pGpuBuffer->sizeInBytes                 = sizeInBytes;
-    pGpuBuffer->bufferUsage                 = bufferUsage;
-    pGpuBuffer->memoryUsageHint             = memoryUsageHint;
-    pGpuBuffer->pName                       = pName;
+    #if 0
+    if(usageFlags & gpu_buffer_usage_flag_t::shader_accessible)
+    {
+        pGpuBuffer->resource.cpuDescriptorHandle  = getNextCPUDescriptorHandle(pGraphicsFrame->pShaderVisibleDescriptorHeap);
+        pGpuBuffer->resource.gpuDescriptorHandle  = getNextGPUDescriptorHandle(pGraphicsFrame->pShaderVisibleDescriptorHeap);
+    }
+    #endif
+
+    pGpuBuffer->resource.descriptorHandle.gpuDescriptorHandle.ptr = pGpuBufferResource->GetGPUVirtualAddress();
+
+    pGpuBuffer->resource.pResource            = pGpuBufferResource.pPointer;
+    pGpuBuffer->resource.currentState         = D3D12_RESOURCE_STATE_COMMON;
+    pGpuBuffer->sizeInBytes                   = sizeInBytes;
+    pGpuBuffer->bufferUsage                   = bufferUsage;
+    pGpuBuffer->memoryUsageHint               = memoryUsageHint;
+    //pGpuBuffer->usageFlags                    = usageFlags;
+    pGpuBuffer->pName                         = pName;
 
     if(pInitialData != nullptr)
     {
@@ -3419,7 +3686,7 @@ NO_DISCARD gpu_buffer_t* createGpuBuffer(graphics_frame_t* pGraphicsFrame, uint3
         }   
     }
 
-    setD3D12ObjectDebugName(pGpuBuffer->bufferResource.pResource, pGpuBuffer->pName);
+    setD3D12ObjectDebugName(pGpuBuffer->resource.pResource, pGpuBuffer->pName);
     pGpuBufferResource.takeOwnership();
     return pGpuBuffer;
 }
@@ -3437,6 +3704,104 @@ NO_DISCARD gpu_buffer_t* createVertexBuffer(graphics_frame_t* pGraphicsFrame, co
 NO_DISCARD gpu_buffer_t* createConstantBuffer(graphics_frame_t* pGraphicsFrame, const uint32_t sizeInBytes, const void* pInitialData = nullptr)
 {
     return createGpuBuffer(pGraphicsFrame, sizeInBytes, pInitialData, gpu_buffer_usage_t::constant_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess);
+}
+
+NO_DISCARD gpu_texture_t* createGpuTexture(graphics_frame_t* pGraphicsFrame, uint3_t dimensions, const void* pInitialData, gpu_texture_format_t format, gpu_texture_format_type_t formatType, gpu_memory_usage_hint_t memoryUsageHint, flags8_t<gpu_texture_flag_t> flags, const uint8_t mipMapLevels, const char* pName = "GpuTexture")
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(!(dimensions.x == 0 && dimensions.y == 0 && dimensions.z == 0));
+
+    dimensions.y = dimensions.y == 0u ? 1u : dimensions.y;
+    dimensions.z = dimensions.z == 0u ? 1u : dimensions.z;
+
+    D3D12_RESOURCE_DIMENSION resourceDimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    if(dimensions.y > 1u && dimensions.z == 1u)
+    {
+        resourceDimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    }
+    if(dimensions.y > 1u && dimensions.z > 1u)
+    {
+        resourceDimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    }
+
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension          = resourceDimension;
+    desc.Alignment          = 0u;
+    desc.Format             = mapTextureFormatToD3D12Format(format, formatType);
+    desc.DepthOrArraySize   = dimensions.z;
+    desc.Height             = dimensions.y;
+    desc.Width              = dimensions.x;
+    desc.MipLevels          = mipMapLevels == 0u ? 1u : mipMapLevels;
+    desc.Layout             = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.SampleDesc.Count   = 1u;
+    desc.SampleDesc.Quality = 0u;
+    
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type                 = mapGpuMemoryHintToHeapType(memoryUsageHint);
+    heapProperties.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    
+    com_auto_release_t<ID3D12Resource> pGpuTextureResource = nullptr;
+    if(COM_CALL(pGraphicsFrame->pDevice->CreateCommittedResource1(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, nullptr, IID_PPV_ARGS(&pGpuTextureResource))) != S_OK)
+    {
+        return nullptr;
+    }
+
+    gpu_texture_t* pGpuTexture = getFreeGpuTexture(pGraphicsFrame->pRenderResourceCache);
+    if(pGpuTexture == nullptr)
+    {
+        return nullptr;
+    }
+
+    const uint32_t sizeInBytes = calculateTextureDataSizeInBytesRecursive(0u, dimensions, format, mipMapLevels);
+
+    pGpuTexture->resource.descriptorHandle.cpuDescriptorHandle  = getNextCPUDescriptorHandle(pGraphicsFrame->pShaderVisibleDescriptorHeap);
+    pGpuTexture->resource.descriptorHandle.gpuDescriptorHandle  = getNextGPUDescriptorHandle(pGraphicsFrame->pShaderVisibleDescriptorHeap);
+    pGpuTexture->resource.pResource            = pGpuTextureResource.pPointer;
+    pGpuTexture->resource.currentState         = D3D12_RESOURCE_STATE_COMMON;
+    pGpuTexture->dimensions                    = dimensions;
+    pGpuTexture->format                        = format;
+    pGpuTexture->formatType                    = formatType;
+    pGpuTexture->flags                         = flags;
+    pGpuTexture->sizeInBytes                   = sizeInBytes;
+    pGpuTexture->memoryUsageHint               = memoryUsageHint;
+    pGpuTexture->pName                         = pName;
+
+    pGraphicsFrame->pDevice->CreateShaderResourceView(pGpuTextureResource.pPointer, nullptr, pGpuTexture->resource.descriptorHandle.cpuDescriptorHandle);
+
+    if(pInitialData != nullptr)
+    {
+        bool useStagingBuffer = ( memoryUsageHint == gpu_memory_usage_hint_t::gpuExclusiveAccess );
+        if(memoryUsageHint != gpu_memory_usage_hint_t::gpuExclusiveAccess)
+        {
+            void* pGpuTextureData = nullptr;
+            if(COM_CALL(pGpuTextureResource->Map(0u, nullptr, &pGpuTextureData)) != S_OK)
+            {
+                useStagingBuffer = true;
+            }
+            else
+            {
+                memcpy(pGpuTextureData, pInitialData, sizeInBytes);
+                pGpuTextureResource->Unmap(0u, nullptr);
+            }
+        }
+
+        if(useStagingBuffer)
+        {
+            gpu_buffer_t* pStagingBuffer = createGpuBuffer(pGraphicsFrame, sizeInBytes, pInitialData, gpu_buffer_usage_t::storage_buffer, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, "Staging Texture Buffer");
+            if(pStagingBuffer == nullptr)
+            {
+                return nullptr;
+            }
+            
+            copyGpuTextureFromBuffer(pGraphicsFrame, pGpuTexture, pStagingBuffer);
+            freeGpuBuffer(pGraphicsFrame, pStagingBuffer);
+        }   
+    }
+
+    setD3D12ObjectDebugName(pGpuTexture->resource.pResource, pGpuTexture->pName);
+    pGpuTextureResource.takeOwnership();
+    return pGpuTexture;
 }
 
 void trackMappedGpuBufferForValidation(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pGpuBuffer)
@@ -3497,7 +3862,7 @@ NO_DISCARD void* mapGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pG
     mapRange.End = mapRangeEndOffsetInBytes == 0u ? pGpuBuffer->sizeInBytes : mapRangeEndOffsetInBytes;
 
     void* pMappedData = nullptr;
-    if(COM_CALL(pGpuBuffer->bufferResource.pResource->Map(0u, &mapRange, &pMappedData)) != S_OK)
+    if(COM_CALL(pGpuBuffer->resource.pResource->Map(0u, &mapRange, &pMappedData)) != S_OK)
     {
         return nullptr;
     }
@@ -3514,7 +3879,7 @@ void unmapGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pGpuBuffer)
 
     untrackMappedGpuBufferForValidation(pGraphicsFrame, pGpuBuffer);
 
-    pGpuBuffer->bufferResource.pResource->Unmap(0u, nullptr);
+    pGpuBuffer->resource.pResource->Unmap(0u, nullptr);
     pGpuBuffer->flags.clearFlag(gpu_buffer_flag_t::is_mapped);
 }
 
@@ -3555,12 +3920,13 @@ void initializeVertexFormat(graphics_frame_t* pGraphicsFrame, vertex_format_t* p
     const uint32_t clampedVertexAttributeCount = GET_MIN(vertexAttributeCount, maxVertexAttributeCount);
     for(uint32_t vertexAttributeIndex = 0u; vertexAttributeIndex < clampedVertexAttributeCount; ++vertexAttributeIndex)
     {
+        const uint32_t attributeOffset = pVertexAttributes[vertexAttributeIndex].offsetInBytes;
         pVertexFormat->pInputElementDescs[vertexAttributeIndex].SemanticName         = getVertexAttributeSemanticBaseName(pVertexAttributes[vertexAttributeIndex].attribute);
         pVertexFormat->pInputElementDescs[vertexAttributeIndex].Format               = convertVertexAttributeFormat(&pVertexAttributes[vertexAttributeIndex]);
         pVertexFormat->pInputElementDescs[vertexAttributeIndex].SemanticIndex        = 0u;
         pVertexFormat->pInputElementDescs[vertexAttributeIndex].InputSlot            = 0u;
         pVertexFormat->pInputElementDescs[vertexAttributeIndex].InputSlotClass       = convertVertexAttributeInputFrequency(pVertexAttributes[vertexAttributeIndex].frequency);
-        pVertexFormat->pInputElementDescs[vertexAttributeIndex].AlignedByteOffset    = pVertexAttributes[vertexAttributeIndex].offsetInBytes;
+        pVertexFormat->pInputElementDescs[vertexAttributeIndex].AlignedByteOffset    = attributeOffset == 0u && vertexAttributeIndex > 0 ? D3D12_APPEND_ALIGNED_ELEMENT : attributeOffset;
         pVertexFormat->pInputElementDescs[vertexAttributeIndex].InstanceDataStepRate = 0u;
 
         ++pVertexFormat->inputElementCount;
@@ -3712,7 +4078,7 @@ void freeCompilerArguments(memory_allocator_t* pMemoryAllocator, dxc_arguments_t
 
 result_t<dxc_arguments_t> generateCompilerArgumentsIntoNewBuffer(memory_allocator_t* pMemoryAllocator, const shader_compilation_parameters_t* pParameters)
 {
-    uint32_t argumentCount = 2u; //entry point + shader profile
+    uint32_t argumentCount = 5u; //entry point + shader profile
     dxc_arguments_t arguments = {};
 
     if(pParameters->pDefines != nullptr && pParameters->pDefines[0] != 0)
@@ -3735,6 +4101,9 @@ result_t<dxc_arguments_t> generateCompilerArgumentsIntoNewBuffer(memory_allocato
 
     ppArguments[0] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-E %hs", pParameters->pEntryPoint);
     ppArguments[1] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-T %hs", pParameters->pShaderProfile);
+    ppArguments[2] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-Zi");
+    ppArguments[3] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-Fo shader.pdb");
+    ppArguments[4] = formatWideStringIntoNewBuffer(pMemoryAllocator, L"-Qembed_debug");
 
     if(pParameters->pDefines != nullptr)
     {
@@ -3749,7 +4118,7 @@ result_t<dxc_arguments_t> generateCompilerArgumentsIntoNewBuffer(memory_allocato
             return result_status_t::out_of_memory;
         }
         
-        for(uint32_t argumentIndex = 2u; argumentIndex < argumentCount; ++argumentIndex)
+        for(uint32_t argumentIndex = 5u; argumentIndex < argumentCount; ++argumentIndex)
         {
             const char* pCurrentDefineEnd = findFirstInstanceOfCharacterInString(pCurrentDefineStart, ';');
             const int defineLength = rangeCheckCast<int>(pCurrentDefineEnd - pCurrentDefineStart);
@@ -3997,7 +4366,7 @@ NO_DISCARD render_context_parameters_t createDefaultRenderContextParameters(HWND
     parameters.limits.maxRenderTargetCount              = 32u;
     parameters.limits.maxShaderBinaryCount              = 32u;
     parameters.limits.maxVertexFormatCount              = 32u;
-    parameters.limits.defaultStagingBufferSizeInBytes   = 4096u;
+    parameters.limits.maxSamplerCount                   = 32u;
 
     return parameters;
 }

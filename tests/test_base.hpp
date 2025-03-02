@@ -298,41 +298,64 @@ mesh_t* createSingleTriangleMesh(graphics_frame_t* pGraphicsFrame, memory_alloca
     return createMesh(pGraphicsFrame, pMemoryAllocator, triangleVertices, 3u, pVertexFormat);
 }
 
-indexed_mesh_t* createRedUnitCubeIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemoryAllocator)
+indexed_mesh_t* createUnitCubeIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemoryAllocator)
 {
     // Cube vertices with color (red) and position
-    constexpr float cubeVertices[] = {
-        // Color (R, G, B)   Position (X, Y, Z, W)
-        1.0f, 0.0f, 0.0f,   -0.5f, -0.5f, -0.5f, 1.0f, // Bottom-left-back
-        1.0f, 0.0f, 0.0f,    0.5f, -0.5f, -0.5f, 1.0f, // Bottom-right-back
-        1.0f, 0.0f, 0.0f,    0.5f,  0.5f, -0.5f, 1.0f, // Top-right-back
-        1.0f, 0.0f, 0.0f,   -0.5f,  0.5f, -0.5f, 1.0f, // Top-left-back
-        1.0f, 0.0f, 0.0f,   -0.5f, -0.5f,  0.5f, 1.0f, // Bottom-left-front
-        1.0f, 0.0f, 0.0f,    0.5f, -0.5f,  0.5f, 1.0f, // Bottom-right-front
-        1.0f, 0.0f, 0.0f,    0.5f,  0.5f,  0.5f, 1.0f, // Top-right-front
-        1.0f, 0.0f, 0.0f,   -0.5f,  0.5f,  0.5f, 1.0f  // Top-left-front
-    };
-
-	constexpr uint32_t cubeIndices[] = {
+	constexpr float cubeVertices[] = {
 		// Front face
-		4, 5, 6,  4, 6, 7,  
+		-0.5f, -0.5f,  0.5f,   	0.0f, 0.0f,   0.0f,  0.0f,  1.0f, // 0
+		 0.5f, -0.5f,  0.5f,   	1.0f, 0.0f,   0.0f,  0.0f,  1.0f, // 1
+		 0.5f,  0.5f,  0.5f,   	1.0f, 1.0f,   0.0f,  0.0f,  1.0f, // 2
+		-0.5f,  0.5f,  0.5f,   	0.0f, 1.0f,   0.0f,  0.0f,  1.0f, // 3
+	
 		// Back face
-		0, 2, 1,  0, 3, 2,  
+		 0.5f, -0.5f, -0.5f,   	0.0f, 0.0f,   0.0f,  0.0f, -1.0f, // 4
+		-0.5f, -0.5f, -0.5f,   	1.0f, 0.0f,   0.0f,  0.0f, -1.0f, // 5
+		-0.5f,  0.5f, -0.5f,   	1.0f, 1.0f,   0.0f,  0.0f, -1.0f, // 6
+		 0.5f,  0.5f, -0.5f,   	0.0f, 1.0f,   0.0f,  0.0f, -1.0f, // 7
+	
 		// Left face
-		0, 4, 7,  0, 7, 3,  
+		-0.5f, -0.5f, -0.5f, 	0.0f, 0.0f,  -1.0f,  0.0f,  0.0f, // 8
+		-0.5f, -0.5f,  0.5f, 	1.0f, 0.0f,  -1.0f,  0.0f,  0.0f, // 9
+		-0.5f,  0.5f,  0.5f, 	1.0f, 1.0f,  -1.0f,  0.0f,  0.0f, // 10
+		-0.5f,  0.5f, -0.5f, 	0.0f, 1.0f,  -1.0f,  0.0f,  0.0f, // 11
+	
 		// Right face
-		1, 2, 6,  1, 6, 5,  
+		 0.5f, -0.5f,  0.5f, 	0.0f, 0.0f,   1.0f,  0.0f,  0.0f, // 12
+		 0.5f, -0.5f, -0.5f, 	1.0f, 0.0f,   1.0f,  0.0f,  0.0f, // 13
+		 0.5f,  0.5f, -0.5f, 	1.0f, 1.0f,   1.0f,  0.0f,  0.0f, // 14
+		 0.5f,  0.5f,  0.5f, 	0.0f, 1.0f,   1.0f,  0.0f,  0.0f, // 15
+	
 		// Top face
-		3, 7, 6,  3, 6, 2,  
+		-0.5f,  0.5f,  0.5f,	0.0f, 0.0f,   0.0f,  1.0f,  0.0f, // 16
+		 0.5f,  0.5f,  0.5f,	1.0f, 0.0f,   0.0f,  1.0f,  0.0f, // 17
+		 0.5f,  0.5f, -0.5f,	1.0f, 1.0f,   0.0f,  1.0f,  0.0f, // 18
+		-0.5f,  0.5f, -0.5f,	0.0f, 1.0f,   0.0f,  1.0f,  0.0f, // 19
+	
 		// Bottom face
-		0, 1, 5,  0, 5, 4   
+		-0.5f, -0.5f, -0.5f, 	0.0f, 0.0f,   0.0f, -1.0f,  0.0f, // 20
+		 0.5f, -0.5f, -0.5f, 	1.0f, 0.0f,   0.0f, -1.0f,  0.0f, // 21
+		 0.5f, -0.5f,  0.5f, 	1.0f, 1.0f,   0.0f, -1.0f,  0.0f, // 22
+		-0.5f, -0.5f,  0.5f, 	0.0f, 1.0f,   0.0f, -1.0f,  0.0f  // 23
 	};
-    vertex_attribute_entry_t pVertexAttributes[] = {
-        {vertex_attribute_t::color, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 3u},
-        {vertex_attribute_t::position, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 12u, 4u}
+	
+	constexpr uint32_t cubeIndices[] = {
+		0, 1, 2,  2, 3, 0,  // Front
+		4, 5, 6,  6, 7, 4,  // Back
+		8, 9, 10, 10,11, 8,  // Left
+		12,13,14, 14,15,12, // Right
+		16,17,18, 18,19,16, // Top
+		20,21,22, 22,23,20  // Bottom
+	};
+
+    vertex_attribute_entry_t vertexAttributes[] = {
+        {vertex_attribute_t::position, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 3u},
+        {vertex_attribute_t::texcoord, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 2u},
+        {vertex_attribute_t::normal, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 3u}
     };
 
-    vertex_format_t* pVertexFormat = createVertexFormat(pGraphicsFrame, pVertexAttributes, 2u);
+	const uint32_t vertexAttributeCount = sizeof(vertexAttributes) / sizeof(vertexAttributes[0]);
+    vertex_format_t* pVertexFormat = createVertexFormat(pGraphicsFrame, vertexAttributes, vertexAttributeCount);
 
 	const uint32_t vertexCount = sizeof(cubeVertices) / calculateVertexStrideSizeInBytes(pVertexFormat);
 	constexpr uint32_t indexCount = sizeof(cubeIndices) / sizeof(uint32_t);

@@ -1,4 +1,4 @@
-cbuffer SpinningCubeData : register(b0)
+cbuffer SpinningCubeData : register(b0, space0)
 {
     float4x4 viewMatrix;
     float4x4 projMatrix;
@@ -8,14 +8,16 @@ cbuffer SpinningCubeData : register(b0)
 
 struct VertexInput
 {
-    float4 pos : POSITION;
-    float3 color : COLOR;
+    float3 pos : POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
 };
 
 struct VertexOutput
 {
     float4 pos : SV_POSITION;
-    float4 color : COLOR;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
 };
 
 VertexOutput main(VertexInput vertexInput)
@@ -24,7 +26,8 @@ VertexOutput main(VertexInput vertexInput)
     float4x4 modelViewProjMatrix = mul(modelMatrix, viewProjMatrix);
 
     VertexOutput output;
-    output.pos = mul(vertexInput.pos, modelViewProjMatrix);
-    output.color = float4(vertexInput.color, 1.0f);
+    output.pos = mul(float4(vertexInput.pos, 1.0f), modelViewProjMatrix);
+    output.uv = vertexInput.uv;
+    output.normal = vertexInput.normal;
     return output;
 }
