@@ -1446,6 +1446,20 @@ void markRenderPassChainAsFree(render_resource_cache_t* pRenderResourceCache, re
     }
 }
 
+template<typename T>
+void mergeLinkedLists(linked_list_node_t<T>** ppLinkedListDestination, linked_list_node_t<T>* pLinkedListSource)
+{
+    linked_list_node_t<T>* pCurrentNode = pLinkedListSource;
+    while(pCurrentNode)
+    {
+        linked_list_node_t<T>* pNextNode = pCurrentNode->pNext;
+        pCurrentNode->pNext = (T*)(*ppLinkedListDestination);
+        (*ppLinkedListDestination) = pCurrentNode;
+
+        pCurrentNode = pNextNode;
+    }
+}
+
 void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
 {
     if(pGraphicsFrame->pFirstGpuBufferToFree != nullptr)
@@ -1456,14 +1470,14 @@ void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
         {
             gpu_buffer_t* pNextGpuBuffer = (gpu_buffer_t*)pGpuBufferToFree->pNext;
             COM_RELEASE(pGpuBufferToFree->resource.pResource);
-            ZeroMemory(pGpuBufferToFree, sizeof(gpu_buffer_t));
+            pGpuBufferToFree->flags.clearFlag(gpu_buffer_flag_t::marked_as_free);
 
             pGpuBufferToFree = pNextGpuBuffer;
 
             ++gpuBufferCount;
         }
 
-        addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeGpuBuffer, pGraphicsFrame->pFirstGpuBufferToFree, gpuBufferCount);
+        mergeLinkedLists(&pGraphicsFrame->pRenderResourceCache->pFirstFreeGpuBuffer, pGraphicsFrame->pFirstGpuBufferToFree);
         pGraphicsFrame->pFirstGpuBufferToFree = nullptr;
     }
 
@@ -1475,14 +1489,14 @@ void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
         {
             gpu_texture_t* pNextGpuTexture = (gpu_texture_t*)pGpuTextureToFree->pNext;
             COM_RELEASE(pGpuTextureToFree->resource.pResource);
-            ZeroMemory(pGpuTextureToFree, sizeof(gpu_texture_t));
+            pGpuTextureToFree->flags.clearFlag(gpu_texture_flag_t::marked_as_free);
 
             pGpuTextureToFree = pNextGpuTexture;
 
             ++gpuTextureCount;
         }
 
-        addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeGpuTexture, pGraphicsFrame->pFirstGpuTextureToFree, gpuTextureCount);
+        mergeLinkedLists(&pGraphicsFrame->pRenderResourceCache->pFirstFreeGpuTexture, pGraphicsFrame->pFirstGpuTextureToFree);
         pGraphicsFrame->pFirstGpuTextureToFree = nullptr;
     }
 
@@ -2849,7 +2863,7 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
 }
 
 template<typename T>
-T* getFreeObjectFromFreeList(linked_list_node_t<T>** ppFreeList, dynamic_array_t<T>* pBackupStorage, const flags8_t<render_resource_flags_t> flags, const char* pObjectName)
+T* popObjectFromFreeList(linked_list_node_t<T>** ppFreeList, dynamic_array_t<T>* pBackupStorage, const flags8_t<render_resource_flags_t> flags, const char* pObjectName)
 {
     if((*ppFreeList) == nullptr)
     {
@@ -2878,17 +2892,17 @@ T* getFreeObjectFromFreeList(linked_list_node_t<T>** ppFreeList, dynamic_array_t
 
 shader_binary_t* getFreeShaderBinary(render_resource_cache_t* pRenderResourceCache)
 {
-    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeShaderBinary, &pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags, "Shader Binaries");
+    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeShaderBinary, &pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags, "Shader Binaries");
 }
 
 render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
 {
-    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeRenderPass, &pRenderResourceCache->renderPasses, pRenderResourceCache->flags, "Render Passes");
+    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeRenderPass, &pRenderResourceCache->renderPasses, pRenderResourceCache->flags, "Render Passes");
 }
 
 gpu_texture_t* getFreeGpuTexture(render_resource_cache_t* pRenderResourceCache)
 {
-    gpu_texture_t* pGpuTexture = getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTexture, &pRenderResourceCache->gpuTextures, pRenderResourceCache->flags, "Gpu Textures");
+    gpu_texture_t* pGpuTexture = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTexture, &pRenderResourceCache->gpuTextures, pRenderResourceCache->flags, "Gpu Textures");
     ASSERT_DEBUG(pGpuTexture != nullptr);
     ASSERT_DEBUG((pGpuTexture->flags & gpu_texture_flag_t::marked_as_free) == 0);
     return pGpuTexture;
@@ -2896,12 +2910,12 @@ gpu_texture_t* getFreeGpuTexture(render_resource_cache_t* pRenderResourceCache)
 
 texture_sampler_t* getFreeSampler(render_resource_cache_t* pRenderResourceCache)
 {
-    return getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeSampler, &pRenderResourceCache->sampler, pRenderResourceCache->flags, "Samplers");
+    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeSampler, &pRenderResourceCache->sampler, pRenderResourceCache->flags, "Samplers");
 }
 
 gpu_buffer_t* getFreeGpuBuffer(render_resource_cache_t* pRenderResourceCache)
 {
-    gpu_buffer_t* pGpuBuffer = getFreeObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuBuffer, &pRenderResourceCache->gpuBuffers, pRenderResourceCache->flags, "Gpu Buffers");
+    gpu_buffer_t* pGpuBuffer = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuBuffer, &pRenderResourceCache->gpuBuffers, pRenderResourceCache->flags, "Gpu Buffers");
     ASSERT_DEBUG(pGpuBuffer != nullptr);
     ASSERT_DEBUG((pGpuBuffer->flags & gpu_buffer_flag_t::marked_as_free) == 0);
     return pGpuBuffer;
