@@ -81,6 +81,8 @@ struct test_context_frame_parameter_t
 
 	uint32_t 			windowWidth;
 	uint32_t 			windowHeight;
+
+	uint32_t 			frameIndex;
 };
 
 struct test_context_t
@@ -609,6 +611,7 @@ int startTest(test_context_t* pTestContext)
 
 		pTestContext->frameParameter.deltaTimeInMs = frameTimeDeltaInMs;
 		pTestContext->frameParameter.totalFrameTimeInMs += frameTimeDeltaInMs;
+		pTestContext->frameParameter.frameIndex++;
 
         snprintf(windowTitleBuffer, sizeof(windowTitleBuffer), "%s - %.3f ms", pTestContext->pWindowTitle, frameTimeDeltaInMs);
         SetWindowTextA(pTestContext->pWindowHandle, windowTitleBuffer);
