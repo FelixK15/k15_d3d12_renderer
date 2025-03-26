@@ -193,7 +193,7 @@ mesh_t* createMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemory
     pMesh->vertexCount = vertexCount;
     pMesh->vertexOffset = 0u;
     pMesh->pVertexFormat = pVertexFormat;
-    pMesh->pVertexBuffer = createVertexBuffer(pGraphicsFrame, vertexBufferSizeInBytes, pVertices);
+    pMesh->pVertexBuffer = createGpuBuffer(pGraphicsFrame, vertexBufferSizeInBytes, pVertices, gpu_buffer_usage_flag_t::vertex_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "Vertex buffer");
 
     return pMesh;
 }
@@ -207,8 +207,8 @@ indexed_mesh_t* createIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_alloc
     pMesh->indexCount = indexCount;
     pMesh->indexOffset = 0u;
     pMesh->pVertexFormat = pVertexFormat;
-	pMesh->pIndexBuffer = createGpuBuffer(pGraphicsFrame, indexBufferSizeInBytes, pIndices, gpu_buffer_usage_t::index_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "Index Buffer");
-    pMesh->pVertexBuffer = createGpuBuffer(pGraphicsFrame, vertexBufferSizeInBytes, pVertices, gpu_buffer_usage_t::vertex_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "Vertex Buffer");
+	pMesh->pIndexBuffer = createGpuBuffer(pGraphicsFrame, indexBufferSizeInBytes, pIndices, gpu_buffer_usage_flag_t::index_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "Index Buffer");
+    pMesh->pVertexBuffer = createGpuBuffer(pGraphicsFrame, vertexBufferSizeInBytes, pVertices, gpu_buffer_usage_flag_t::vertex_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "Vertex Buffer");
 
     return pMesh;
 }
@@ -216,8 +216,8 @@ indexed_mesh_t* createIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_alloc
 material_t* createMaterial(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemoryAllocator, vertex_format_t* pVertexFormat, const shader_compilation_parameters_t* pVertexShaderParameters, const shader_compilation_parameters_t* pPixelShaderParameters)
 {
     graphics_pipeline_parameters_t pipelineParameters = {};
-    pipelineParameters.pVertexShader   = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pVertexShaderParameters);
-    pipelineParameters.pPixelShader    = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pPixelShaderParameters);
+    pipelineParameters.pVertexShader   = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pVertexShaderParameters, shader_type_flag_t::vertex_shader);
+    pipelineParameters.pPixelShader    = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pPixelShaderParameters, shader_type_flag_t::pixel_shader);
     pipelineParameters.pVertexFormat   = pVertexFormat;
     pipelineParameters.pName           = "Sample Material";
 	pipelineParameters.topology 	   = topology_t::triangle_list;

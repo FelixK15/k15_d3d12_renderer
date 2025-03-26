@@ -8,20 +8,40 @@
             "name": "Launch debug clear backbuffer",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/debug/clear_backbuffer.exe",
+            "program": "${workspaceFolder}/win32/build/clear_backbuffer/debug/clear_backbuffer.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/debug",
+            "cwd": "${workspaceFolder}/win32/build/clear_backbuffer/debug",
             "environment": []
         },
         {
             "name": "Launch debug render triangle",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/debug/render_triangle.exe",
+            "program": "${workspaceFolder}/win32/build/render_triangle/debug/render_triangle.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/debug",
+            "cwd": "${workspaceFolder}/win32/build/render_triangle/debug",
+            "environment": []
+        },
+        {
+            "name": "Launch debug spinning cube",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/win32/build/spinning_cube/debug/spinning_cube.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/win32/build/spinning_cube/debug",
+            "environment": []
+        },
+        {
+            "name": "Launch debug compute texture",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/win32/build/compute_texture/debug/compute_texture.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/win32/build/compute_texture/debug",
             "environment": []
         }
     ]
