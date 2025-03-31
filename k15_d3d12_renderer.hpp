@@ -700,7 +700,6 @@ enum class gpu_pass_type_t : uint8_t
 
 struct gpu_command_buffer_t : public linked_list_node_t<gpu_command_buffer_t>
 {
-    ID3D12Fence*                    pCommandBufferFence;
     D3D12GraphicsCommandListType*   pCommandList;
     gpu_pass_type_t                 forPassType;
     bool                            isOpen;
@@ -722,6 +721,7 @@ struct render_pass_t : public linked_list_node_t<render_pass_t>
     bool                        isOpen;
     graphics_frame_t*           pGraphicsFrame;
     render_pass_t*              pFirstRenderPassDependency;
+    ID3D12Fence*                pEndPassFence;
     gpu_pass_type_t             type;
     pipeline_state_t            pipelineState;
 };
@@ -876,32 +876,49 @@ enum render_resource_flags_t : uint8_t
     notify_on_array_grow    = 0x01
 };
 
+template<typename T>
+struct page_allocator_page_entry_t
+{
+    T*                              pMemory;
+    page_allocator_page_entry_t<T>* pNext;
+};
+
+template<typename T>
+struct page_allocator_t
+{
+    memory_allocator_t*             pAllocator;
+    page_allocator_page_entry_t<T>* pFirstPage;
+    uint32_t                        elementCountPerPage;
+};
+
 struct render_resource_cache_t
 {
-    memory_allocator_t*                                 pMemoryAllocator;
-    dynamic_array_t<gpu_texture_t>                      gpuTextures;
-    dynamic_array_t<gpu_texture_view_t>                 gpuTextureViews;
-    dynamic_array_t<gpu_buffer_t>                       gpuBuffers;
-    dynamic_array_t<render_pass_t>                      renderPasses;
-    dynamic_array_t<render_target_t>                    renderTargets;
-    dynamic_array_t<shader_binary_t>                    shaderBinaries;
-    dynamic_array_t<texture_sampler_t>                  sampler;
-    dynamic_array_t<gpu_command_allocator_t>            gpuCommandAllocators;
-    dynamic_array_t<gpu_command_buffer_t>               gpuCommandBuffers;
+    D3D12DeviceType*                                pDevice;
+    memory_allocator_t*                             pMemoryAllocator;
 
-    hash_map_t<graphics_pipeline_t>                     graphicPipelines;
-    hash_map_t<compute_pipeline_t>                      computePipelines;
-    hash_map_t<vertex_format_t>                         vertexFormats;
+    page_allocator_t<gpu_texture_t>                 gpuTextureAllocator;
+    page_allocator_t<gpu_texture_view_t>            gpuTextureViewAllocator;
+    page_allocator_t<gpu_buffer_t>                  gpuBufferAllocator;
+    page_allocator_t<render_pass_t>                 renderPassAllocator;
+    page_allocator_t<render_target_t>               renderTargetAllocator;
+    page_allocator_t<shader_binary_t>               shaderBinaryAllocator;
+    page_allocator_t<texture_sampler_t>             samplerAllocator;
+    page_allocator_t<gpu_command_allocator_t>       gpuCommandAllocatorAllocator;
+    page_allocator_t<gpu_command_buffer_t>          gpuCommandBufferAllocator;
 
-    linked_list_node_t<render_pass_t>*                  pFirstFreeRenderPass;
-    linked_list_node_t<gpu_buffer_t>*                   pFirstFreeGpuBuffer;
-    linked_list_node_t<gpu_texture_t>*                  pFirstFreeGpuTexture;
-    linked_list_node_t<gpu_texture_view_t>*             pFirstFreeGpuTextureView;
-    linked_list_node_t<render_target_t>*                pFirstFreeRenderTarget;
-    linked_list_node_t<shader_binary_t>*                pFirstFreeShaderBinary;
-    linked_list_node_t<texture_sampler_t>*              pFirstFreeSampler;
-    linked_list_node_t<gpu_command_allocator_t>**       ppFirstFreeCommandAllocatorPerQueueType;
-    linked_list_node_t<gpu_command_buffer_t>**          ppFirstFreeCommandBufferPerQueueType;
+    hash_map_t<graphics_pipeline_t>                 graphicPipelines;
+    hash_map_t<compute_pipeline_t>                  computePipelines;
+    hash_map_t<vertex_format_t>                     vertexFormats;
+
+    linked_list_node_t<render_pass_t>*              pFirstFreeRenderPass;
+    linked_list_node_t<gpu_buffer_t>*               pFirstFreeGpuBuffer;
+    linked_list_node_t<gpu_texture_t>*              pFirstFreeGpuTexture;
+    linked_list_node_t<gpu_texture_view_t>*         pFirstFreeGpuTextureView;
+    linked_list_node_t<render_target_t>*            pFirstFreeRenderTarget;
+    linked_list_node_t<shader_binary_t>*            pFirstFreeShaderBinary;
+    linked_list_node_t<texture_sampler_t>*          pFirstFreeSampler;
+    linked_list_node_t<gpu_command_allocator_t>**   ppFirstFreeCommandAllocatorPerQueueType;
+    linked_list_node_t<gpu_command_buffer_t>**      ppFirstFreeCommandBufferPerQueueType;
 
     flags8_t<render_resource_flags_t>               flags;
 };
@@ -940,6 +957,7 @@ struct graphics_frame_t
 
     ID3D12Fence**                           ppFrameFences;
     D3D12DeviceType*                        pDevice;
+    ID3D12CommandQueue**                    ppCommandQueues;
 
     HANDLE                                  pFrameFinishedEvent;
     uint64_t                                frameIndex;
@@ -955,10 +973,14 @@ struct graphics_frame_collection_t
 
 struct graphics_frame_parameters_t
 {
-    descriptor_heap_t* pShaderDescriptorHeap;
-    descriptor_heap_t* pSamplerDescriptorHeap;
-    descriptor_heap_t* pRenderTargetColorViewDescriptorHeap;
-    descriptor_heap_t* pRenderTargetDepthViewDescriptorHeap;
+    D3D12DeviceType*            pDevice;
+    ID3D12CommandQueue**        ppCommandQueues;
+    render_resource_cache_t*    pRenderResourceCache;
+    shader_compiler_context_t*  pShaderCompilerContext;
+    descriptor_heap_t*          pShaderDescriptorHeap;
+    descriptor_heap_t*          pSamplerDescriptorHeap;
+    descriptor_heap_t*          pRenderTargetColorViewDescriptorHeap;
+    descriptor_heap_t*          pRenderTargetDepthViewDescriptorHeap;
 };
 
 struct render_context_t
@@ -2671,11 +2693,17 @@ void destroyGraphicsFrameCollection(graphics_frame_collection_t* pGraphicsFrameC
     freeFromAllocator(pGraphicsFrameCollection->pMemoryAllocator, pGraphicsFrameCollection->pGraphicsFrames);
 }
 
-bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, render_resource_cache_t* pRenderResourceCache, shader_compiler_context_t* pShaderCompilerContext, D3D12DeviceType* pDevice)
+bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, memory_allocator_t* pMemoryAllocator, const graphics_frame_parameters_t* pGraphicsFrameParameters)
 {
     ASSERT_DEBUG(pGraphicsFrameParameters != nullptr);
     ASSERT_DEBUG(pMemoryAllocator != nullptr);
-    ASSERT_DEBUG(pDevice != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->pDevice != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->ppCommandQueues != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->pShaderCompilerContext != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->pRenderResourceCache != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->ppCommandQueues[(uint32_t)gpu_pass_type_t::render] != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->ppCommandQueues[(uint32_t)gpu_pass_type_t::compute] != nullptr);
+    ASSERT_DEBUG(pGraphicsFrameParameters->ppCommandQueues[(uint32_t)gpu_pass_type_t::copy] != nullptr);
 
     ID3D12Fence** ppFences = (ID3D12Fence**)allocateFromAllocator(pMemoryAllocator, sizeof(void*));
     if(ppFences == nullptr)
@@ -2687,12 +2715,14 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
     graphicsFrame.ppFrameFences = ppFences;
     graphicsFrame.pMemoryAllocator = pMemoryAllocator;
     graphicsFrame.pFrameFinishedEvent = CreateEvent(nullptr, TRUE, TRUE, "");
-    graphicsFrame.pShaderCompilerContext = pShaderCompilerContext;
-    graphicsFrame.pRenderResourceCache = pRenderResourceCache;
+    graphicsFrame.pShaderCompilerContext = pGraphicsFrameParameters->pShaderCompilerContext;
+    graphicsFrame.pRenderResourceCache = pGraphicsFrameParameters->pRenderResourceCache;
+    graphicsFrame.ppCommandQueues = pGraphicsFrameParameters->ppCommandQueues;
     graphicsFrame.pShaderVisibleDescriptorHeap = pGraphicsFrameParameters->pShaderDescriptorHeap;
     graphicsFrame.pSamplerDescriptorHeap = pGraphicsFrameParameters->pSamplerDescriptorHeap;
     graphicsFrame.pRenderTargetColorViewDescriptorHeap = pGraphicsFrameParameters->pRenderTargetColorViewDescriptorHeap;
     graphicsFrame.pRenderTargetDepthViewDescriptorHeap = pGraphicsFrameParameters->pRenderTargetDepthViewDescriptorHeap;
+    graphicsFrame.pDevice = pGraphicsFrameParameters->pDevice;
 
     if(graphicsFrame.pFrameFinishedEvent == nullptr)
     {
@@ -2713,12 +2743,11 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
 
     createStackMemoryAllocator(graphicsFrame.pFrameAllocator, MegaByte(1), pFrameAllocatorMemory);
 
-    graphicsFrame.pDevice = pDevice;
 
     const uint32_t queueCount = (uint32_t)gpu_pass_type_t::count;
     for(uint32_t queueIndex = 0u; queueIndex < queueCount; ++queueIndex)
     {
-        if(!createFence(pDevice, &graphicsFrame.ppFrameFences[queueIndex], 0))
+        if(!createFence(graphicsFrame.pDevice, &graphicsFrame.ppFrameFences[queueIndex], 0))
         {
             goto cleanup_and_exit_failure;
         }
@@ -2737,7 +2766,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, const graphics_fram
         return false;
 }
 
-bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrameCollection, const graphics_frame_parameters_t* pGraphicsFrameParameters, memory_allocator_t* pMemoryAllocator, render_resource_cache_t* pRenderResourceCache, shader_compiler_context_t* pShaderCompilerContext, D3D12DeviceType* pDevice, const uint8_t frameCount)
+bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrameCollection, memory_allocator_t* pMemoryAllocator, const graphics_frame_parameters_t* pGraphicsFrameParameters,  const uint8_t frameCount)
 {
     graphics_frame_collection_t graphicFrameCollection = {};
     graphicFrameCollection.pMemoryAllocator = pMemoryAllocator;
@@ -2750,7 +2779,7 @@ bool createGraphicsFrameCollection(graphics_frame_collection_t* pOutGraphicFrame
 
     for(uint32_t frameIndex = 0u; frameIndex < frameCount; ++frameIndex)
     {
-        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], pGraphicsFrameParameters, pMemoryAllocator, pRenderResourceCache, pShaderCompilerContext, pDevice))
+        if(!createGraphicsFrame(&graphicFrameCollection.pGraphicsFrames[frameIndex], pMemoryAllocator, pGraphicsFrameParameters))
         {
             goto cleanup_and_exit_failure;
         }
@@ -2923,39 +2952,124 @@ bool areAllGpuBuffersReleased(dynamic_array_t<gpu_buffer_t>* pGpuBuffers)
     return !foundLeakedResources;
 }
 
+template<typename T>
+page_allocator_page_entry_t<T>* allocatePageEntryForPageAllocator(memory_allocator_t* pAllocator, const uint32_t pageElementCount, const alloc_flags_t flags)
+{
+    const uint32_t pageSizeInBytes = pageElementCount * sizeof(T) + sizeof(page_allocator_page_entry_t<T>);
+    void* pPageMemory = allocateFromAllocator(pAllocator, pageSizeInBytes, flags);
+    if(pPageMemory == nullptr)
+    {
+        return nullptr;
+    }
+
+    page_allocator_page_entry_t<T>* pPageEntry = (page_allocator_page_entry_t<T>*)pPageMemory;
+    pPageEntry->pMemory = (T*)(pPageEntry + 1);
+    return pPageEntry;
+}
+
+template<typename T>
+bool createPageAllocator(page_allocator_t<T>* pOutAllocator, memory_allocator_t* pAllocator, const uint32_t pageElementCount, const alloc_flags_t flags)
+{
+    ASSERT_DEBUG(pOutAllocator != nullptr);
+    ASSERT_DEBUG(pAllocator != nullptr);
+    ASSERT_DEBUG(pageElementCount != 0);
+
+    page_allocator_page_entry_t<T>* pPageEntry = allocatePageEntryForPageAllocator<T>(pAllocator, pageElementCount, flags);
+    if(pPageEntry == nullptr)
+    {
+        return false;
+    }
+
+    pOutAllocator->pFirstPage = pPageEntry;
+    pOutAllocator->pAllocator = pAllocator;
+    pOutAllocator->elementCountPerPage = pageElementCount;
+    return true;
+}
+
+template<typename T>
+void destroyPageAllocator(page_allocator_t<T>* pPageAllocator)
+{
+    page_allocator_page_entry_t<T>* pAllocatorPage = pPageAllocator->pFirstPage;
+    while(pAllocatorPage != nullptr)
+    {
+        page_allocator_page_entry_t<T>* pNextPage = pAllocatorPage->pNext;
+        freeFromDefaultAllocator(pPageAllocator->pAllocator, pAllocatorPage);
+        pAllocatorPage = pNextPage;
+    }
+}
+
+template<typename T>
+T* allocateNewPageWorthOfObjects(page_allocator_t<T>* pPageAllocator, const alloc_flags_t allocFlags)
+{
+    page_allocator_page_entry_t<T>* pPageAllocatorEntry = allocatePageEntryForPageAllocator<T>(pPageAllocator->pAllocator, pPageAllocator->elementCountPerPage, allocFlags);
+    if(pPageAllocatorEntry == nullptr)
+    {
+        return nullptr;
+    }
+
+    pPageAllocatorEntry->pNext = pPageAllocator->pFirstPage;
+    pPageAllocator->pFirstPage = pPageAllocatorEntry;
+    return pPageAllocatorEntry->pMemory;
+}
+
 void destroyRenderResourceCache(render_resource_cache_t* pRenderResourceCache)
 {
-    Validate(areAllGpuBuffersReleased(&pRenderResourceCache->gpuBuffers), "Leaked GPU buffers detected.");
+    //Validate(areAllGpuBuffersReleased(&pRenderResourceCache->gpuBufferAllocator.), "Leaked GPU buffers detected.");
     //Validate((areAllGraphicPipelinesReleased(&pRenderResourceCache->graphicPipelines), "Leaked graphics pipeline states.");
     //TODO: More validation
 
-    gpu_command_buffer_t* pCommandBuffers = (gpu_command_buffer_t*)pRenderResourceCache->gpuCommandBuffers.pData;
-    for(uint32_t i = 0u; i < pRenderResourceCache->gpuCommandBuffers.capacity; ++i)
     {
-        gpu_command_buffer_t* pCommandBuffer = &pCommandBuffers[i];
-        COM_RELEASE(pCommandBuffer->pCommandList);
-        COM_RELEASE(pCommandBuffer->pCommandBufferFence);
+        page_allocator_page_entry_t<gpu_command_buffer_t>* pCommandBufferAllocatorPage = pRenderResourceCache->gpuCommandBufferAllocator.pFirstPage;
+        while(pCommandBufferAllocatorPage != nullptr)
+        {
+            for(uint32_t i = 0u; i < pRenderResourceCache->gpuCommandBufferAllocator.elementCountPerPage; ++i)
+            {
+                COM_RELEASE(pCommandBufferAllocatorPage->pMemory[i].pCommandList);
+            }
+
+            pCommandBufferAllocatorPage = pCommandBufferAllocatorPage->pNext;
+        }
+    }
+    
+    {
+        page_allocator_page_entry_t<gpu_command_allocator_t>* pCommandAllocatorAllocatorPage = pRenderResourceCache->gpuCommandAllocatorAllocator.pFirstPage;
+        while(pCommandAllocatorAllocatorPage != nullptr)
+        {
+            for(uint32_t i = 0u; i < pRenderResourceCache->gpuCommandAllocatorAllocator.elementCountPerPage; ++i)
+            {
+                COM_RELEASE(pCommandAllocatorAllocatorPage->pMemory[i].pCommandAllocator);
+            }
+
+            pCommandAllocatorAllocatorPage = pCommandAllocatorAllocatorPage->pNext;
+        }
     }
 
-    gpu_command_allocator_t* pCommandAllocators = (gpu_command_allocator_t*)pRenderResourceCache->gpuCommandAllocators.pData;
-    for(uint32_t i = 0u; i < pRenderResourceCache->gpuCommandAllocators.capacity; ++i)
     {
-        gpu_command_allocator_t* pCommandAllocator = &pCommandAllocators[i];
-        COM_RELEASE(pCommandAllocator->pCommandAllocator);
+        page_allocator_page_entry_t<render_pass_t>* pRenderPassAllocatorPage = pRenderResourceCache->renderPassAllocator.pFirstPage;
+        while(pRenderPassAllocatorPage != nullptr)
+        {
+            for(uint32_t i = 0u; i < pRenderResourceCache->renderPassAllocator.elementCountPerPage; ++i)
+            {
+                COM_RELEASE(pRenderPassAllocatorPage->pMemory[i].pEndPassFence);
+            }
+
+            pRenderPassAllocatorPage = pRenderPassAllocatorPage->pNext;
+        }
     }
+
 
     destroyHashMap(&pRenderResourceCache->vertexFormats);
     destroyHashMap(&pRenderResourceCache->graphicPipelines);
     destroyHashMap(&pRenderResourceCache->computePipelines);
 
-    destroyDynamicArray(&pRenderResourceCache->gpuBuffers);
-    destroyDynamicArray(&pRenderResourceCache->gpuTextures);
-    destroyDynamicArray(&pRenderResourceCache->shaderBinaries);
-    destroyDynamicArray(&pRenderResourceCache->renderTargets);
-    destroyDynamicArray(&pRenderResourceCache->renderPasses);
-    destroyDynamicArray(&pRenderResourceCache->sampler);
-    destroyDynamicArray(&pRenderResourceCache->gpuCommandAllocators);
-    destroyDynamicArray(&pRenderResourceCache->gpuCommandBuffers);
+    destroyPageAllocator(&pRenderResourceCache->gpuBufferAllocator);
+    destroyPageAllocator(&pRenderResourceCache->gpuTextureAllocator);
+    destroyPageAllocator(&pRenderResourceCache->shaderBinaryAllocator);
+    destroyPageAllocator(&pRenderResourceCache->renderTargetAllocator);
+    destroyPageAllocator(&pRenderResourceCache->renderPassAllocator);
+    destroyPageAllocator(&pRenderResourceCache->samplerAllocator);
+    destroyPageAllocator(&pRenderResourceCache->gpuCommandAllocatorAllocator);
+    destroyPageAllocator(&pRenderResourceCache->gpuCommandBufferAllocator);
 }
 
 D3D12_COMMAND_LIST_TYPE mapGpuPassTypeToD3D12CommandListType(const gpu_pass_type_t gpuPassType)
@@ -2973,8 +3087,6 @@ D3D12_COMMAND_LIST_TYPE mapGpuPassTypeToD3D12CommandListType(const gpu_pass_type
     ASSERT_DEBUG_UNREACHABLE_CODE();
     return D3D12_COMMAND_LIST_TYPE_DIRECT;
 }
-
-
 
 flags32_t<gpu_resource_state_flag_t> mapBufferUsageToResourceStates(const flags8_t<gpu_buffer_usage_flag_t> gpuBufferUsage)
 {
@@ -3146,14 +3258,66 @@ bool initGpuCommandBuffer(D3D12DeviceType* pDevice, const gpu_pass_type_t gpuPas
             return false;
         }
 
-        if(COM_CALL(pDevice->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&pCurrentCommandBuffer->pCommandBufferFence)) != S_OK))
-        {
-            return false;
-        }
-
         pCurrentCommandBuffer->isOpen = false;
         pCurrentCommandBuffer->forPassType = gpuPassType;
         pCurrentNode = pCurrentNode->pNext;
+    }
+
+    return true;
+}
+
+bool initGpuCommandAllocators(D3D12DeviceType* pDevice, const uint32_t* pGpuPassCountPerQueueType, page_allocator_t<gpu_command_allocator_t>* pCommandAllocatorAllocator, linked_list_node_t<gpu_command_allocator_t>** ppFirstFreeCommandAllocatorPerQueueType)
+{
+    uint32_t offset = 0u;
+    const uint32_t queueCount = (uint32_t)gpu_pass_type_t::count;
+    for(uint32_t queueIndex = 0u; queueIndex < queueCount; ++queueIndex)
+    {
+        const uint32_t countPerQueueType = pGpuPassCountPerQueueType[queueIndex];
+        createLinkedList(&ppFirstFreeCommandAllocatorPerQueueType[queueIndex], pCommandAllocatorAllocator->pFirstPage->pMemory + offset, countPerQueueType);
+        offset += countPerQueueType;
+
+        if(!initGpuCommandAllocator(pDevice, (gpu_pass_type_t)queueIndex, ppFirstFreeCommandAllocatorPerQueueType[queueIndex]))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool initGpuCommandBuffers(D3D12DeviceType* pDevice, const uint32_t* pGpuPassCountPerQueueType, page_allocator_t<gpu_command_buffer_t>* pGpuCommandBufferAllocator, linked_list_node_t<gpu_command_buffer_t>** ppFirstFreeCommandBufferPerQueueType)
+{
+    uint32_t offset = 0u;
+    const uint32_t queueCount = (uint32_t)gpu_pass_type_t::count;
+    for(uint32_t queueIndex = 0u; queueIndex < queueCount; ++queueIndex)
+    {
+        const uint32_t countPerQueueType = pGpuPassCountPerQueueType[queueIndex];
+        createLinkedList(&ppFirstFreeCommandBufferPerQueueType[queueIndex], pGpuCommandBufferAllocator->pFirstPage->pMemory + offset, countPerQueueType);
+        offset += countPerQueueType;
+
+        if(!initGpuCommandBuffer(pDevice, (gpu_pass_type_t)queueIndex, ppFirstFreeCommandBufferPerQueueType[queueIndex]))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool createRenderPassFences(D3D12DeviceType* pDevice, linked_list_node_t<render_pass_t>* pFirstRenderPassNode)
+{
+    ASSERT_DEBUG(pDevice != nullptr);
+    ASSERT_DEBUG(pFirstRenderPassNode != nullptr);
+    render_pass_t* pRenderPass = (render_pass_t*)pFirstRenderPassNode;
+    ASSERT_DEBUG(pRenderPass->pEndPassFence == nullptr);
+
+    while(pRenderPass != nullptr)
+    {
+        if(!createFence(pDevice, &pRenderPass->pEndPassFence, 0u))
+        {
+            return false;
+        }
+        pRenderPass = pRenderPass->pNext;
     }
 
     return true;
@@ -3163,6 +3327,7 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
 {
     pOutRenderResourceCache->pMemoryAllocator = pMemoryAllocator;
     pOutRenderResourceCache->flags = 0u;
+    pOutRenderResourceCache->pDevice = pDevice;
 
     if(notifyOnLimitReach)
     {
@@ -3193,15 +3358,15 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
     renderResourceCacheAllocationFailed |= !createHashMap<graphics_pipeline_t>(&pOutRenderResourceCache->graphicPipelines, pMemoryAllocator, pLimits->maxGraphicsPipelineCount, clear_memory);
     renderResourceCacheAllocationFailed |= !createHashMap<compute_pipeline_t>(&pOutRenderResourceCache->computePipelines, pMemoryAllocator, pLimits->maxComputePipelineCount, clear_memory);
 
-    renderResourceCacheAllocationFailed |= !createDynamicArray<gpu_texture_t>(&pOutRenderResourceCache->gpuTextures, pMemoryAllocator, pLimits->maxGpuTextureCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<gpu_texture_view_t>(&pOutRenderResourceCache->gpuTextureViews, pMemoryAllocator, pLimits->maxGpuTextureViewCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<gpu_buffer_t>(&pOutRenderResourceCache->gpuBuffers, pMemoryAllocator, pLimits->maxGpuBufferCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<shader_binary_t>(&pOutRenderResourceCache->shaderBinaries, pMemoryAllocator, pLimits->maxShaderBinaryCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<render_target_t>(&pOutRenderResourceCache->renderTargets, pMemoryAllocator, pLimits->maxRenderTargetCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<render_pass_t>(&pOutRenderResourceCache->renderPasses, pMemoryAllocator, totalGpuPassCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<texture_sampler_t>(&pOutRenderResourceCache->sampler, pMemoryAllocator, pLimits->maxSamplerCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<gpu_command_allocator_t>(&pOutRenderResourceCache->gpuCommandAllocators, pMemoryAllocator, totalGpuPassCount, clear_memory);
-    renderResourceCacheAllocationFailed |= !createDynamicArray<gpu_command_buffer_t>(&pOutRenderResourceCache->gpuCommandBuffers, pMemoryAllocator, totalGpuPassCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<gpu_texture_t>(&pOutRenderResourceCache->gpuTextureAllocator, pMemoryAllocator, pLimits->maxGpuTextureCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<gpu_texture_view_t>(&pOutRenderResourceCache->gpuTextureViewAllocator, pMemoryAllocator, pLimits->maxGpuTextureViewCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<gpu_buffer_t>(&pOutRenderResourceCache->gpuBufferAllocator, pMemoryAllocator, pLimits->maxGpuBufferCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<shader_binary_t>(&pOutRenderResourceCache->shaderBinaryAllocator, pMemoryAllocator, pLimits->maxShaderBinaryCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<render_target_t>(&pOutRenderResourceCache->renderTargetAllocator, pMemoryAllocator, pLimits->maxRenderTargetCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<render_pass_t>(&pOutRenderResourceCache->renderPassAllocator, pMemoryAllocator, totalGpuPassCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<texture_sampler_t>(&pOutRenderResourceCache->samplerAllocator, pMemoryAllocator, pLimits->maxSamplerCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<gpu_command_allocator_t>(&pOutRenderResourceCache->gpuCommandAllocatorAllocator, pMemoryAllocator, totalGpuPassCount, clear_memory);
+    renderResourceCacheAllocationFailed |= !createPageAllocator<gpu_command_buffer_t>(&pOutRenderResourceCache->gpuCommandBufferAllocator, pMemoryAllocator, totalGpuPassCount, clear_memory);
 
     if(renderResourceCacheAllocationFailed)
     {
@@ -3209,44 +3374,30 @@ bool createRenderResourceCache(D3D12DeviceType* pDevice, render_resource_cache_t
         return false;
     }
 
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderPass, (render_pass_t*)pOutRenderResourceCache->renderPasses.pData, pOutRenderResourceCache->renderPasses.capacity);
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderTarget, (render_target_t*)pOutRenderResourceCache->renderTargets.pData, pOutRenderResourceCache->renderTargets.capacity);
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuBuffer, (gpu_buffer_t*)pOutRenderResourceCache->gpuBuffers.pData, pOutRenderResourceCache->gpuBuffers.capacity);
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuTexture, (gpu_texture_t*)pOutRenderResourceCache->gpuTextures.pData, pOutRenderResourceCache->gpuTextures.capacity);
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuTextureView, (gpu_texture_view_t*)pOutRenderResourceCache->gpuTextureViews.pData, pOutRenderResourceCache->gpuTextureViews.capacity);
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeShaderBinary, (shader_binary_t*)pOutRenderResourceCache->shaderBinaries.pData, pOutRenderResourceCache->shaderBinaries.capacity);
-    createLinkedList(&pOutRenderResourceCache->pFirstFreeSampler, (texture_sampler_t*)pOutRenderResourceCache->sampler.pData, pOutRenderResourceCache->sampler.capacity);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderPass, pOutRenderResourceCache->renderPassAllocator.pFirstPage->pMemory, pOutRenderResourceCache->renderPassAllocator.elementCountPerPage);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeRenderTarget, pOutRenderResourceCache->renderTargetAllocator.pFirstPage->pMemory, pOutRenderResourceCache->renderTargetAllocator.elementCountPerPage);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuBuffer, pOutRenderResourceCache->gpuBufferAllocator.pFirstPage->pMemory, pOutRenderResourceCache->gpuBufferAllocator.elementCountPerPage);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuTexture, pOutRenderResourceCache->gpuTextureAllocator.pFirstPage->pMemory, pOutRenderResourceCache->gpuTextureAllocator.elementCountPerPage);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeGpuTextureView, pOutRenderResourceCache->gpuTextureViewAllocator.pFirstPage->pMemory, pOutRenderResourceCache->gpuTextureAllocator.elementCountPerPage);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeShaderBinary, pOutRenderResourceCache->shaderBinaryAllocator.pFirstPage->pMemory, pOutRenderResourceCache->shaderBinaryAllocator.elementCountPerPage);
+    createLinkedList(&pOutRenderResourceCache->pFirstFreeSampler, pOutRenderResourceCache->samplerAllocator.pFirstPage->pMemory, pOutRenderResourceCache->samplerAllocator.elementCountPerPage);
 
+    if(!initGpuCommandAllocators(pDevice, gpuPassCountPerQueueType, &pOutRenderResourceCache->gpuCommandAllocatorAllocator, pOutRenderResourceCache->ppFirstFreeCommandAllocatorPerQueueType))
     {
-        uint32_t offset = 0u;
-        for(uint32_t queueIndex = 0u; queueIndex < queueCount; ++queueIndex)
-        {
-            const uint32_t countPerQueueType = gpuPassCountPerQueueType[queueIndex];
-            createLinkedList(&pOutRenderResourceCache->ppFirstFreeCommandAllocatorPerQueueType[queueIndex], (gpu_command_allocator_t*)pOutRenderResourceCache->gpuCommandAllocators.pData + offset, countPerQueueType);
-            offset += countPerQueueType;
-
-            if(!initGpuCommandAllocator(pDevice, (gpu_pass_type_t)queueIndex, pOutRenderResourceCache->ppFirstFreeCommandAllocatorPerQueueType[queueIndex]))
-            {
-                destroyRenderResourceCache(pOutRenderResourceCache);
-                return false;
-            }
-        }
+        destroyRenderResourceCache(pOutRenderResourceCache);
+        return false;
     }
 
+    if(!initGpuCommandBuffers(pDevice, gpuPassCountPerQueueType, &pOutRenderResourceCache->gpuCommandBufferAllocator, pOutRenderResourceCache->ppFirstFreeCommandBufferPerQueueType))
     {
-        uint32_t offset = 0u;
-        for(uint32_t queueIndex = 0u; queueIndex < queueCount; ++queueIndex)
-        {
-            const uint32_t countPerQueueType = gpuPassCountPerQueueType[queueIndex];
-            createLinkedList(&pOutRenderResourceCache->ppFirstFreeCommandBufferPerQueueType[queueIndex], (gpu_command_buffer_t*)pOutRenderResourceCache->gpuCommandBuffers.pData + offset, countPerQueueType);
-            offset += countPerQueueType;
+        destroyRenderResourceCache(pOutRenderResourceCache);
+        return false;
+    }
 
-            if(!initGpuCommandBuffer(pDevice, (gpu_pass_type_t)queueIndex, pOutRenderResourceCache->ppFirstFreeCommandBufferPerQueueType[queueIndex]))
-            {
-                destroyRenderResourceCache(pOutRenderResourceCache);
-                return false;
-            }
-        }
+    if(!createRenderPassFences(pDevice, pOutRenderResourceCache->pFirstFreeRenderPass))
+    {
+        destroyRenderResourceCache(pOutRenderResourceCache);
+        return false;
     }
 
     return true;
@@ -3321,11 +3472,15 @@ bool createRenderContext(render_context_t* pRenderContext, const render_context_
     }
 
     graphics_frame_parameters_t graphicsFrameParameters = {};
+    graphicsFrameParameters.pDevice                 = pRenderContext->pDevice;
+    graphicsFrameParameters.ppCommandQueues         = pRenderContext->ppCommandQueues;
     graphicsFrameParameters.pShaderDescriptorHeap   = &pRenderContext->shaderVisibleDescriptorHeap;
     graphicsFrameParameters.pSamplerDescriptorHeap  = &pRenderContext->samplerDescriptorHeap;
+    graphicsFrameParameters.pRenderResourceCache    = &pRenderContext->renderResourceCache;
+    graphicsFrameParameters.pShaderCompilerContext  = &pRenderContext->shaderCompilerContext;
     graphicsFrameParameters.pRenderTargetColorViewDescriptorHeap  = &pRenderContext->renderTargetColorViewDescriptorHeap;
     graphicsFrameParameters.pRenderTargetDepthViewDescriptorHeap  = &pRenderContext->renderTargetDepthViewDescriptorHeap;
-    if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &graphicsFrameParameters, &pRenderContext->defaultAllocator, &pRenderContext->renderResourceCache, &pRenderContext->shaderCompilerContext, pRenderContext->pDevice, pParameters->frameBufferCount))
+    if(!createGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection, &pRenderContext->defaultAllocator, &graphicsFrameParameters, pParameters->frameBufferCount))
     {
         return false;
     }
@@ -3397,12 +3552,12 @@ void executeGpuPasses(render_context_t* pRenderContext, render_pass_t* pFirstRen
         render_pass_t* pRenderPassDependency = pRenderPass->pFirstRenderPassDependency;
         while(pRenderPassDependency)
         {
-            pRenderContext->ppCommandQueues[renderPassTypeIndex]->Wait(pRenderPassDependency->pGpuCommandBuffer->pCommandBufferFence, frameIndex);
+            pRenderContext->ppCommandQueues[renderPassTypeIndex]->Wait(pRenderPassDependency->pEndPassFence, frameIndex);
             pRenderPassDependency = pRenderPassDependency->pNext;
         }
 
         pRenderContext->ppCommandQueues[renderPassTypeIndex]->ExecuteCommandLists(1u, (ID3D12CommandList* const*)&pRenderPass->pGpuCommandBuffer->pCommandList);
-        pRenderContext->ppCommandQueues[renderPassTypeIndex]->Signal(pRenderPass->pGpuCommandBuffer->pCommandBufferFence, frameIndex);
+        pRenderContext->ppCommandQueues[renderPassTypeIndex]->Signal(pRenderPass->pEndPassFence, frameIndex);
         pRenderPass = (render_pass_t*)pRenderPass->pNext;
     }
 }
@@ -3502,25 +3657,22 @@ void finishFrame(render_context_t* pRenderContext, graphics_frame_t* pGraphicsFr
 }
 
 template<typename T>
-T* popObjectFromFreeList(linked_list_node_t<T>** ppFreeList, dynamic_array_t<T>* pBackupStorage, const flags8_t<render_resource_flags_t> flags, const char* pObjectName)
+T* popObjectFromFreeList(linked_list_node_t<T>** ppFreeList, page_allocator_t<T>* pBackupAllocator, const flags8_t<render_resource_flags_t> flags, const char* pObjectName)
 {
     if((*ppFreeList) == nullptr)
     {
         if(flags & render_resource_flags_t::notify_on_array_grow)
         {
-            logWarning("free list for '%s' ran out of space, growing backing storage.\n", pObjectName);
-
-            const uint32_t oldCapacity = pBackupStorage->capacity;
-            T* pNodesToAdd = (T*)pBackupStorage->pData + pBackupStorage->capacity;
-            if(!tryToGrowDynamicArray(pBackupStorage))
+            logWarning("free list for '%s' ran out of space, growing page allocator.\n", pObjectName);
+            
+            T* pNewNodes = (T*)allocateNewPageWorthOfObjects(pBackupAllocator, alloc_flags_t::clear_memory);
+            if(pNewNodes == nullptr)
             {
-                logError("could not grow backing storage for '%s'.\n", pObjectName);
                 return nullptr;
             }
 
-            const uint32_t newCapacity = pBackupStorage->capacity;
-            const uint32_t nodesToAdd = newCapacity - oldCapacity;
-            *ppFreeList = addNodesToLinkedList(ppFreeList, pNodesToAdd, nodesToAdd);
+            const uint32_t objectPerPage = pBackupAllocator->elementCountPerPage;
+            *ppFreeList = addNodesToLinkedList(ppFreeList, pNewNodes, objectPerPage);
         }
     }
 
@@ -3531,17 +3683,24 @@ T* popObjectFromFreeList(linked_list_node_t<T>** ppFreeList, dynamic_array_t<T>*
 
 shader_binary_t* getFreeShaderBinary(render_resource_cache_t* pRenderResourceCache)
 {
-    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeShaderBinary, &pRenderResourceCache->shaderBinaries, pRenderResourceCache->flags, "Shader Binaries");
+    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeShaderBinary, &pRenderResourceCache->shaderBinaryAllocator, pRenderResourceCache->flags, "Shader Binaries");
 }
 
 render_pass_t* getFreeRenderPass(render_resource_cache_t* pRenderResourceCache)
 {
-    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeRenderPass, &pRenderResourceCache->renderPasses, pRenderResourceCache->flags, "Render Passes");
+    bool createNewRenderPassFences = ( pRenderResourceCache->pFirstFreeRenderPass == nullptr );
+    render_pass_t* pRenderPass = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeRenderPass, &pRenderResourceCache->renderPassAllocator, pRenderResourceCache->flags, "Render Passes");
+
+    if(createNewRenderPassFences && pRenderPass != nullptr)
+    {
+        createRenderPassFences(pRenderResourceCache->pDevice, pRenderResourceCache->pFirstFreeRenderPass);
+    }
+    return pRenderPass;
 }
 
 gpu_texture_t* getFreeGpuTexture(render_resource_cache_t* pRenderResourceCache)
 {
-    gpu_texture_t* pGpuTexture = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTexture, &pRenderResourceCache->gpuTextures, pRenderResourceCache->flags, "Gpu Textures");
+    gpu_texture_t* pGpuTexture = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTexture, &pRenderResourceCache->gpuTextureAllocator, pRenderResourceCache->flags, "Gpu Textures");
     ASSERT_DEBUG(pGpuTexture != nullptr);
     ASSERT_DEBUG((pGpuTexture->flags & gpu_texture_flag_t::marked_as_free) == 0);
     return pGpuTexture;
@@ -3549,19 +3708,19 @@ gpu_texture_t* getFreeGpuTexture(render_resource_cache_t* pRenderResourceCache)
 
 gpu_texture_view_t* getFreeGpuTextureView(render_resource_cache_t* pRenderResourceCache)
 {
-    gpu_texture_view_t* pGpuTextureView = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTextureView, &pRenderResourceCache->gpuTextureViews, pRenderResourceCache->flags, "Gpu Texture Views");
+    gpu_texture_view_t* pGpuTextureView = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuTextureView, &pRenderResourceCache->gpuTextureViewAllocator, pRenderResourceCache->flags, "Gpu Texture Views");
     ASSERT_DEBUG(pGpuTextureView != nullptr);
     return pGpuTextureView;
 }
 
 texture_sampler_t* getFreeSampler(render_resource_cache_t* pRenderResourceCache)
 {
-    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeSampler, &pRenderResourceCache->sampler, pRenderResourceCache->flags, "Samplers");
+    return popObjectFromFreeList(&pRenderResourceCache->pFirstFreeSampler, &pRenderResourceCache->samplerAllocator, pRenderResourceCache->flags, "Samplers");
 }
 
 gpu_buffer_t* getFreeGpuBuffer(render_resource_cache_t* pRenderResourceCache)
 {
-    gpu_buffer_t* pGpuBuffer = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuBuffer, &pRenderResourceCache->gpuBuffers, pRenderResourceCache->flags, "Gpu Buffers");
+    gpu_buffer_t* pGpuBuffer = popObjectFromFreeList(&pRenderResourceCache->pFirstFreeGpuBuffer, &pRenderResourceCache->gpuBufferAllocator, pRenderResourceCache->flags, "Gpu Buffers");
     ASSERT_DEBUG(pGpuBuffer != nullptr);
     ASSERT_DEBUG((pGpuBuffer->flags & gpu_buffer_flag_t::marked_as_free) == 0);
     return pGpuBuffer;
@@ -3570,13 +3729,13 @@ gpu_buffer_t* getFreeGpuBuffer(render_resource_cache_t* pRenderResourceCache)
 gpu_command_buffer_t* getFreeGpuCommandBuffer(render_resource_cache_t* pRenderResourceCache, const gpu_pass_type_t gpuPassType)
 {
     const uint32_t index = (uint32_t)gpuPassType;
-    return popObjectFromFreeList(&pRenderResourceCache->ppFirstFreeCommandBufferPerQueueType[index], &pRenderResourceCache->gpuCommandBuffers, pRenderResourceCache->flags, "GPU Command Buffers");
+    return popObjectFromFreeList(&pRenderResourceCache->ppFirstFreeCommandBufferPerQueueType[index], &pRenderResourceCache->gpuCommandBufferAllocator, pRenderResourceCache->flags, "GPU Command Buffers");
 }
 
 gpu_command_allocator_t* getFreeGpuCommandAllocator(render_resource_cache_t* pRenderResourceCache, const gpu_pass_type_t gpuPassType)
 {
     const uint32_t index = (uint32_t)gpuPassType;
-    return popObjectFromFreeList(&pRenderResourceCache->ppFirstFreeCommandAllocatorPerQueueType[index], &pRenderResourceCache->gpuCommandAllocators, pRenderResourceCache->flags, "GPU Command Buffer Allocators");
+    return popObjectFromFreeList(&pRenderResourceCache->ppFirstFreeCommandAllocatorPerQueueType[index], &pRenderResourceCache->gpuCommandAllocatorAllocator, pRenderResourceCache->flags, "GPU Command Buffer Allocators");
 }
 
 void openCommandBuffer(gpu_command_buffer_t* pGpuCommandBuffer, gpu_command_allocator_t* pGpuCommandAllocator)
