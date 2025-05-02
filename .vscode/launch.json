@@ -5,6 +5,16 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Launch samples",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/win32/build/debug/samples.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/win32/build/debug",
+            "environment": []
+        },
+        {
             "name": "Launch debug clear backbuffer",
             "type": "cppvsdbg",
             "request": "launch",

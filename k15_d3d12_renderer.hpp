@@ -5551,6 +5551,8 @@ void destroyCommandAllocator(ID3D12CommandAllocator* pCommandAllocator)
 
 void shutdownRenderContext(render_context_t* pRenderContext)
 {
+    ASSERT_DEBUG(pRenderContext != nullptr);
+
     destroyGraphicsFrameCollection(&pRenderContext->graphicsFramesCollection);
     destroySwapChain(&pRenderContext->swapChain);
     destroyRenderResourceCache(&pRenderContext->renderResourceCache);
@@ -5585,6 +5587,8 @@ void shutdownRenderContext(render_context_t* pRenderContext)
 
 void resizeBackBuffer(render_context_t* pRenderContext, const uint32_t width, const uint32_t height)
 {
+    ASSERT_DEBUG(pRenderContext != nullptr);
+
     flushAllFrames(pRenderContext);
 
     for(uint32_t bufferIndex = 0u; bufferIndex < pRenderContext->swapChain.backBufferCount; ++bufferIndex)

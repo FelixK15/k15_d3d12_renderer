@@ -1,6 +1,8 @@
 {
     "files.associations": {
         "*.h": "cpp",
+        "*.cpp": "cpp",
+        "*.c": "cpp",
         "new": "cpp",
         "memory_resource": "cpp",
         "iomanip": "cpp",
@@ -59,15 +61,17 @@
         "ratio": "cpp",
         "tuple": "cpp",
         "variant": "cpp",
-        "xlocnum": "cpp"
+        "xlocnum": "cpp",
+        "filesystem": "cpp"
     },
-    "C_Cpp.default.defines": [ "K15_SOFTWARE_RASTERIZER_IMPLEMENTATION" ],
-    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.defines": [ "" ],
+    "C_Cpp.default.cppStandard": "c++14",
     "C_Cpp.default.cStandard": "c11",
     "C_Cpp.default.includePath": [
         "win32",
         "..",
+        "tests/imgui",
+        "tests",
         "G:/programs/Superluminal/Performance/API/include"
-    ],
-    "C_Cpp.intelliSenseEngineFallback": "enabled"
+    ]
 }
