@@ -77,7 +77,7 @@ if "!OUTPUT_FOLDER!"=="" (
 )
 
 if "!COMPILER_OPTIONS!"=="" (
-    set DEFAULT_COMPILER_OPTIONS=/nologo /FC /TP /W3
+    set DEFAULT_COMPILER_OPTIONS=/nologo /FC /TP /W3 /D_CRT_SECURE_NO_WARNINGS
     if "!BUILD_CONFIGURATION!"=="debug" (
         set DEFAULT_COMPILER_OPTIONS=!DEFAULT_COMPILER_OPTIONS! /Od /Zi /GS /MTd /std:c++17
     ) else if "!BUILD_CONFIGURATION!"=="release" (

@@ -12,12 +12,35 @@
 #include "compute_texture\compute_texture_sample.hpp"
 #endif
 
+#pragma comment(lib, "Advapi32.lib")
+
 descriptor_heap_t* pImGuiDescriptorHeap = nullptr;
 
 struct sample_imgui_state_t
 {
     bool mainWindowOpen;
+    bool mainWindowMaximized;
+    bool mainWindowMinimized;
+    bool mainWindowIsMaximized;
     bool showSamplesMenu;
+};
+
+struct sample_context_t
+{
+    HWND                    pWindowHandle;
+
+    render_context_t*       pRenderContext;
+    sample_imgui_state_t    imguiState;
+
+    LARGE_INTEGER           performanceFrequency;
+
+    float 				    deltaTimeInMs;
+	float 				    totalFrameTimeInMs;
+
+    uint32_t 			    windowWidth;
+	uint32_t 			    windowHeight;
+
+	uint32_t 			    frameIndex;
 };
 
 struct sample_frame_parameter_t
@@ -28,31 +51,302 @@ struct sample_frame_parameter_t
 	graphics_frame_t* 	    pGraphicsFrame;
 	render_target_t* 	    pRenderTarget;
 
-    sample_imgui_state_t    imguiState;
+    sample_imgui_state_t*   pImGuiState;
 
 	void* 				    pUserData;
 
 	float 				    deltaTimeInMs;
-	float 				    totalFrameTimeInMs;
-
-	uint32_t 			    windowWidth;
-	uint32_t 			    windowHeight;
-
 	uint32_t 			    frameIndex;
+    uint32_t                windowWidth;
+    uint32_t                windowHeight;
 };
+
+struct window_parameter_t
+{
+    int x;
+    int y;
+    int width;
+    int height;
+};
+
+bool readWindowParametersFromRegistry(window_parameter_t* pOutParameter)
+{
+    HKEY regKey;
+    DWORD dataSize = sizeof(int);
+    bool success = false;
+    if(RegCreateKeyA(HKEY_CURRENT_USER, "SOFTWARE\\K15TECH\\D3D12RENDERER", &regKey) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegGetValueA(regKey, "", "sample_window_x", RRF_RT_DWORD, nullptr, &pOutParameter->x, &dataSize) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegGetValueA(regKey, "", "sample_window_y", RRF_RT_DWORD, nullptr, &pOutParameter->y, &dataSize) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegGetValueA(regKey, "", "sample_window_width", RRF_RT_DWORD, nullptr, &pOutParameter->width, &dataSize) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegGetValueA(regKey, "", "sample_window_height", RRF_RT_DWORD, nullptr, &pOutParameter->height, &dataSize) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    success = true;
+
+cleanup_and_exit:
+    RegCloseKey(regKey);
+
+    return success;
+}
+
+bool writeWindowParametersToRegistry(const window_parameter_t* pParameter)
+{
+    HKEY regKey;
+    bool success = false;
+    if(RegCreateKeyA(HKEY_CURRENT_USER, "SOFTWARE\\K15TECH\\D3D12RENDERER", &regKey) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegSetValueExA(regKey, "sample_window_x", 0, REG_DWORD, (const BYTE*)&pParameter->x, sizeof(int)) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegSetValueExA(regKey, "sample_window_y", 0, REG_DWORD, (const BYTE*)&pParameter->y, sizeof(int)) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegSetValueExA(regKey, "sample_window_width", 0, REG_DWORD, (const BYTE*)&pParameter->width, sizeof(int)) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegSetValueExA(regKey, "sample_window_height", 0, REG_DWORD, (const BYTE*)&pParameter->height, sizeof(int)) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    success = true;
+
+cleanup_and_exit:
+    RegCloseKey(regKey);
+
+    return success;
+}
+
+BOOL validMonitorProc(HMONITOR pMonitor, HDC pDeviceContext, LPRECT pClipRect, LPARAM pParam)
+{
+    BOOL* pParameterValid = (BOOL*)pParam;
+    *pParameterValid = TRUE;
+
+    return TRUE;
+}
+
+bool isValidWindowParameters(const window_parameter_t* pWindowParameter)
+{
+    if(pWindowParameter->height == 0 || pWindowParameter->width == 0)
+    {
+        return false;
+    }
+    
+    RECT clipRect = {};
+    clipRect.left = pWindowParameter->x;
+    clipRect.top = pWindowParameter->y;
+    clipRect.right = pWindowParameter->x + pWindowParameter->width;
+    clipRect.bottom = pWindowParameter->y + pWindowParameter->height;
+
+    BOOL parametersAreValid = false;
+    EnumDisplayMonitors(nullptr, &clipRect, validMonitorProc, (LPARAM)&parametersAreValid);
+
+    return parametersAreValid;
+}
+
+bool pumpWin32Messages()
+{
+    MSG msg = {};
+    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+
+        if (msg.message == WM_QUIT)
+            return false;
+    }
+
+    return true;
+}
+
+void renderImGui(graphics_frame_t* pGraphicsFrame)
+{
+    ImGui::Render();
+    render_pass_t* pImGuiRenderPass = startRenderPass(pGraphicsFrame, "ImGui Pass", pGraphicsFrame->pBackBuffer);
+    clearColorRenderTarget(pImGuiRenderPass, pGraphicsFrame->pBackBuffer, 1.0f, 1.0f, 1.0f, 1.0f);
+    pImGuiRenderPass->pGpuCommandBuffer->pCommandList->SetDescriptorHeaps(1u, &pImGuiDescriptorHeap->pDescriptorHeap);
+    pImGuiRenderPass->pGpuCommandBuffer->pCommandList->OMSetRenderTargets(1u, &pImGuiRenderPass->pipelineState.pRenderTarget->colorBufferHandle, FALSE, nullptr);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), pImGuiRenderPass->pGpuCommandBuffer->pCommandList);
+    endRenderPass(pGraphicsFrame, pImGuiRenderPass);
+    executeRenderPass(pGraphicsFrame, pImGuiRenderPass);
+}
+
+void startImGuiFrame()
+{
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+}
+
+void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
+{
+    ImVec2 windowSize = {};
+    windowSize.x = (float)pSampleFrameParameter->windowWidth;
+    windowSize.y = (float)pSampleFrameParameter->windowHeight;
+    
+    sample_imgui_state_t* pImguiState = pSampleFrameParameter->pImGuiState;
+    if(!ImGui::Begin("K15 D3D12 Rendering Samples", &pImguiState->mainWindowOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove, &pImguiState->mainWindowMaximized, &pImguiState->mainWindowMinimized))
+    {
+        return;
+    }
+
+    
+    ImGui::SetWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetWindowSize(windowSize, ImGuiCond_Always);
+
+    if(ImGui::BeginMenuBar())
+    {
+        if(ImGui::BeginMenu("Samples", &pImguiState->showSamplesMenu))
+        {
+            ImGui::MenuItem("Bla");
+            ImGui::EndMenu();
+        }
+        ImGui::EndMenuBar();
+    }
+
+    ImGui::End();
+}
+
+void doSampleFrame(sample_context_t* pSampleContext, graphics_frame_t* pGraphicsFrame)
+{
+    sample_frame_parameter_t sampleFrameParameter = {};
+    sampleFrameParameter.pWindowHandle  = pSampleContext->pWindowHandle;
+    sampleFrameParameter.pRenderContext = pSampleContext->pRenderContext;
+    sampleFrameParameter.pGraphicsFrame = pGraphicsFrame;
+    sampleFrameParameter.deltaTimeInMs  = pSampleContext->deltaTimeInMs;
+    sampleFrameParameter.frameIndex     = pSampleContext->frameIndex;
+    sampleFrameParameter.windowHeight   = pSampleContext->windowHeight;
+    sampleFrameParameter.windowWidth    = pSampleContext->windowWidth;
+    sampleFrameParameter.pImGuiState    = &pSampleContext->imguiState;
+
+    startImGuiFrame();
+    doGeneralSampleImGuiFrame(&sampleFrameParameter);
+    renderImGui(pGraphicsFrame);
+}
+
+void handleMainWindowTitleBarLogic(sample_context_t* pSampleContext)
+{
+    if(!pSampleContext->imguiState.mainWindowOpen)
+    {
+        PostQuitMessage(0);
+    }
+
+    if(pSampleContext->imguiState.mainWindowMaximized)
+    {
+        pSampleContext->imguiState.mainWindowMaximized = false;
+        
+        if(pSampleContext->imguiState.mainWindowIsMaximized)
+        {
+            ShowWindow(pSampleContext->pWindowHandle, SW_NORMAL);
+        }
+        else
+        {
+            ShowWindow(pSampleContext->pWindowHandle, SW_MAXIMIZE);
+        }
+        
+        pSampleContext->imguiState.mainWindowIsMaximized = !pSampleContext->imguiState.mainWindowIsMaximized;
+    }
+
+    if(pSampleContext->imguiState.mainWindowMinimized)
+    {
+        pSampleContext->imguiState.mainWindowMinimized = false;
+        ShowWindow(pSampleContext->pWindowHandle, SW_MINIMIZE);
+    }
+}
+
+void doSampleGuiFrame(sample_context_t* pSampleContext)
+{
+    LARGE_INTEGER endTime, startTime;
+
+    QueryPerformanceCounter(&startTime);
+    graphics_frame_t* pGraphicsFrame = beginNextFrame(pSampleContext->pRenderContext);
+    doSampleFrame(pSampleContext, pGraphicsFrame);
+    finishFrame(pSampleContext->pRenderContext, pGraphicsFrame);
+    QueryPerformanceCounter(&endTime);
+
+    handleMainWindowTitleBarLogic(pSampleContext);
+    
+
+    const LONGLONG frameTimeDelta = endTime.QuadPart - startTime.QuadPart;
+    pSampleContext->deltaTimeInMs = ((float)frameTimeDelta / (float)pSampleContext->performanceFrequency.QuadPart) * 1000.f;
+    ++pSampleContext->frameIndex;
+
+    pSampleContext->totalFrameTimeInMs += pSampleContext->deltaTimeInMs;
+}
+
+void handleWindowResize(sample_context_t* pSampleContext, const uint32_t newWidth, const uint32_t newHeight)
+{
+    pSampleContext->windowWidth = newWidth;
+    pSampleContext->windowHeight = newHeight;
+    
+    resizeBackBuffer(pSampleContext->pRenderContext, newWidth, newHeight);
+    doSampleGuiFrame(pSampleContext);
+}
+
+void windowResizing(HWND hwnd, WPARAM wparam, LPARAM lparam)
+{
+    sample_context_t* pSampleContext = (sample_context_t*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    if(pSampleContext == nullptr)
+    {
+        return;
+    }
+
+    const LPRECT pWindowSize = (LPRECT)lparam;
+    const uint32_t newWidth = pWindowSize->right - pWindowSize->left;
+    const uint32_t newHeight = pWindowSize->bottom - pWindowSize->top;
+    handleWindowResize(pSampleContext, newWidth, newHeight);
+}
 
 void windowResized(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
-    sample_frame_parameter_t* pSampleFrameParameter = (sample_frame_parameter_t*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
-    if(pSampleFrameParameter == nullptr)
+    sample_context_t* pSampleContext = (sample_context_t*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    if(pSampleContext == nullptr)
+    {
         return;
+    }
 
     const uint32_t newWidth = LOWORD(lparam);
     const uint32_t newHeight = HIWORD(lparam);
+    handleWindowResize(pSampleContext, newWidth, newHeight);
+}
 
-	pSampleFrameParameter->windowHeight = newHeight;
-	pSampleFrameParameter->windowWidth = newWidth;
-    resizeBackBuffer(pSampleFrameParameter->pRenderContext, newWidth, newHeight);
+void windowChanged(HWND hwnd, LPARAM lparam)
+{
+    const WINDOWPOS* pWindowPos = (WINDOWPOS*)lparam;
+
+    window_parameter_t windowParameter = {};
+    windowParameter.x = pWindowPos->x;
+    windowParameter.y = pWindowPos->y;
+    windowParameter.height = pWindowPos->cy;
+    windowParameter.width = pWindowPos->cx;
+    writeWindowParametersToRegistry(&windowParameter);
 }
 
 int dragWindow(HWND hwnd, WPARAM wparam, LPARAM lparam)
@@ -99,8 +393,10 @@ int dragWindow(HWND hwnd, WPARAM wparam, LPARAM lparam)
         return HTRIGHT;
     }
 
+    const int buttonWidth = (int)(ImGui::GetStyle().ItemInnerSpacing.x + ImGui::GetFontSize());
+    const int titleBarButtonStartLeft = windowWidth - (int)(ImGui::GetStyle().WindowBorderSize + ImGui::GetStyle().FramePadding.x + 3.0f * buttonWidth);
     const int titleBarHeight = (int)(ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2.0f);
-    if (pt.y < titleBarHeight && pt.x < windowWidth - 30)
+    if (pt.y < titleBarHeight && pt.x < titleBarButtonStartLeft)
     {
         return HTCAPTION;
     }
@@ -151,9 +447,16 @@ LRESULT CALLBACK D3D12TestAppWindowProc(HWND p_HWND, UINT p_Message, WPARAM p_wP
 	case WM_MOUSEWHEEL:
 		break;
     
+    case WM_SIZING:
+        windowResizing(p_HWND, p_wParam, p_lParam);
+        break;
+
     case WM_SIZE:
         windowResized(p_HWND, p_Message, p_wParam, p_lParam);
-        messageHandled = true;
+        break;
+    
+    case WM_WINDOWPOSCHANGED:
+        windowChanged(p_HWND, p_lParam);
         break;
 	}
 
@@ -165,7 +468,7 @@ LRESULT CALLBACK D3D12TestAppWindowProc(HWND p_HWND, UINT p_Message, WPARAM p_wP
 	return 0;
 }
 
-HWND setupWindow(HINSTANCE hInstance, int width, int height, const char* pWindowTitle)
+HWND setupWindow(HINSTANCE hInstance, int x, int y, int width, int height, const char* pWindowTitle)
 {
 	WNDCLASS wndClass = {0};
 	wndClass.style = CS_HREDRAW | CS_OWNDC | CS_VREDRAW;
@@ -175,9 +478,7 @@ HWND setupWindow(HINSTANCE hInstance, int width, int height, const char* pWindow
 	wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
 	RegisterClass(&wndClass);
 
-	HWND hwnd = CreateWindowA("D3D12RenderWindow", pWindowTitle,
-		WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
-		width, height, 0, 0, hInstance, 0);
+	HWND hwnd = CreateWindowA("D3D12RenderWindow", pWindowTitle, WS_POPUP, x, y, width, height, 0, 0, hInstance, 0);
 
 	if (hwnd == INVALID_HANDLE_VALUE)
 		MessageBox(0, "Error creating Window.\n", "Error!", 0);
@@ -235,147 +536,56 @@ bool initializeImGui(HWND pWindowHandle, D3D12DeviceType* pDevice, ID3D12Command
     return true;
 }
 
-bool pumpWin32Message()
-{
-    MSG msg = {};
-    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE) > 0)
-    {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-
-        if (msg.message == WM_QUIT)
-            return false;
-    }
-
-    return true;
-}
-
-void renderImGui(graphics_frame_t* pGraphicsFrame)
-{
-    ImGui::Render();
-    render_pass_t* pImGuiRenderPass = startRenderPass(pGraphicsFrame, "ImGui Pass", pGraphicsFrame->pBackBuffer);
-    clearColorRenderTarget(pImGuiRenderPass, pGraphicsFrame->pBackBuffer, 1.0f, 1.0f, 1.0f, 1.0f);
-    pImGuiRenderPass->pGpuCommandBuffer->pCommandList->SetDescriptorHeaps(1u, &pImGuiDescriptorHeap->pDescriptorHeap);
-    pImGuiRenderPass->pGpuCommandBuffer->pCommandList->OMSetRenderTargets(1u, &pImGuiRenderPass->pipelineState.pRenderTarget->colorBufferHandle, FALSE, nullptr);
-    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), pImGuiRenderPass->pGpuCommandBuffer->pCommandList);
-    endRenderPass(pGraphicsFrame, pImGuiRenderPass);
-    executeRenderPass(pGraphicsFrame, pImGuiRenderPass);
-}
-
-void startImGuiFrame()
-{
-    ImGui_ImplDX12_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-}
-
-void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
-{
-    ImVec2 windowSize = {};
-    windowSize.x = (float)pSampleFrameParameter->windowWidth;
-    windowSize.y = (float)pSampleFrameParameter->windowHeight;
-    
-    sample_imgui_state_t* pImguiState = &pSampleFrameParameter->imguiState;
-    if(!ImGui::Begin("K15 D3D12 Rendering Samples", &pImguiState->mainWindowOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-    {
-        return;
-    }
-    
-    ImGui::SetWindowSize(windowSize, ImGuiCond_Always);
-
-    if(ImGui::BeginMenuBar())
-    {
-        if(ImGui::BeginMenu("Samples", &pImguiState->showSamplesMenu))
-        {
-            ImGui::MenuItem("Bla");
-            ImGui::EndMenu();
-        }
-        ImGui::EndMenuBar();
-    }
-
-    ImGui::End();
-}
-
-bool doSampleFrame(HWND pWindowHandle, render_context_t* pRenderContext, graphics_frame_t* pGraphicsFrame, sample_frame_parameter_t* pSampleFrameParameter, float deltaTimeInMs, uint32_t frameIndex)
-{
-    sample_frame_parameter_t sampleFrameParameter = {};
-    sampleFrameParameter.pWindowHandle  = pWindowHandle;
-    sampleFrameParameter.pRenderContext = pRenderContext;
-    sampleFrameParameter.pGraphicsFrame = pGraphicsFrame;
-    sampleFrameParameter.deltaTimeInMs  = deltaTimeInMs;
-    sampleFrameParameter.frameIndex     = frameIndex;
-
-    startImGuiFrame();
-    //ImGui::ShowDemoWindow();
-    doGeneralSampleImGuiFrame(pSampleFrameParameter);
-    renderImGui(pGraphicsFrame);
-
-    return pSampleFrameParameter->imguiState.mainWindowOpen;
-}
-
 void sampleMainLoop(HWND pWindowHandle, render_context_t* pRenderContext)
 {
     float frameTimeDeltaInMs = 0.0f;
     uint32_t frameIndex = 0;
-    LARGE_INTEGER performanceFrequency, endTime, startTime;
+    LARGE_INTEGER performanceFrequency;;
 	QueryPerformanceFrequency(&performanceFrequency);
 
-    sample_frame_parameter_t frameParameter = {};
-    frameParameter.pRenderContext = pRenderContext;
-    frameParameter.pWindowHandle = pWindowHandle;
-    frameParameter.imguiState.mainWindowOpen = true;
+    sample_context_t sampleContext = {};
+    sampleContext.pRenderContext = pRenderContext;
+    sampleContext.pWindowHandle = pWindowHandle;
+    sampleContext.imguiState.mainWindowOpen = true;
+    sampleContext.performanceFrequency = performanceFrequency;
     
     RECT clientRect = {};
     GetClientRect(pWindowHandle, &clientRect);
-    frameParameter.windowWidth = clientRect.right - clientRect.left;
-    frameParameter.windowHeight = clientRect.bottom - clientRect.top;
+    sampleContext.windowWidth = clientRect.right - clientRect.left;
+    sampleContext.windowHeight = clientRect.bottom - clientRect.top;
 
-    SetWindowLongPtrA(pWindowHandle, GWLP_USERDATA, (LONG_PTR)&frameParameter);
+    SetWindowLongPtrA(pWindowHandle, GWLP_USERDATA, (LONG_PTR)&sampleContext);
     while(true)
     {
-        if(!pumpWin32Message())
+        if(!pumpWin32Messages())
         {
             break;
         }
 
-        QueryPerformanceCounter(&startTime);
-        graphics_frame_t* pGraphicsFrame = beginNextFrame(pRenderContext);
-        if(!doSampleFrame(pWindowHandle, pRenderContext, pGraphicsFrame, &frameParameter, frameTimeDeltaInMs, frameIndex))
-        {
-            break;
-        }
-        finishFrame(pRenderContext, pGraphicsFrame);
-        QueryPerformanceCounter(&endTime);
-
-        const LONGLONG frameTimeDelta = endTime.QuadPart - startTime.QuadPart;
-        frameTimeDeltaInMs = ((float)frameTimeDelta / (float)performanceFrequency.QuadPart) * 1000.f;
-        ++frameIndex;
-#if 0
-        pFrameParameter->pGraphicsFrame = beginNextFrame(pTestContext->pRenderContext);
-        if(firstFrame)
-        {
-            if(pTestContext->pInitCallback != nullptr)
-            {
-                pTestContext->pInitCallback(pFrameParameter);
-            }
-
-            firstFrame = false;
-        }
-
-        pTestContext->pFrameCallback(pFrameParameter);
-
-        if(loopRunning == false && pTestContext->pShutdownCallback != nullptr)
-        {
-            pTestContext->pShutdownCallback(pFrameParameter);
-        }
-        finishFrame(pTestContext->pRenderContext, pFrameParameter->pGraphicsFrame);
-#endif
+        doSampleGuiFrame(&sampleContext);
     }
 }
 
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd)
 {
-    HWND pWindowHandle = setupWindow(hInstance, 1024, 768, "K15 D3D12 Renderer Samples");
+    window_parameter_t sampleWindowParameter = {};
+    sampleWindowParameter.x = 0;
+    sampleWindowParameter.y = 0;
+    sampleWindowParameter.width = 1024;
+    sampleWindowParameter.height = 768;
+
+    if(readWindowParametersFromRegistry(&sampleWindowParameter))
+    {
+        if(!isValidWindowParameters(&sampleWindowParameter))
+        {
+            sampleWindowParameter.x = 0;
+            sampleWindowParameter.y = 0;
+            sampleWindowParameter.width = 1024;
+            sampleWindowParameter.height = 768;
+        }
+    }
+
+    HWND pWindowHandle = setupWindow(hInstance, sampleWindowParameter.x, sampleWindowParameter.y, sampleWindowParameter.width, sampleWindowParameter.height, "K15 D3D12 Renderer Samples");
     if(pWindowHandle == INVALID_HANDLE_VALUE)
     {
         return -1;
