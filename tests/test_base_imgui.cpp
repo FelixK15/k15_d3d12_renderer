@@ -292,7 +292,6 @@ void doSampleGuiFrame(sample_context_t* pSampleContext)
     QueryPerformanceCounter(&endTime);
 
     handleMainWindowTitleBarLogic(pSampleContext);
-    
 
     const LONGLONG frameTimeDelta = endTime.QuadPart - startTime.QuadPart;
     pSampleContext->deltaTimeInMs = ((float)frameTimeDelta / (float)pSampleContext->performanceFrequency.QuadPart) * 1000.f;
@@ -308,6 +307,28 @@ void handleWindowResize(sample_context_t* pSampleContext, const uint32_t newWidt
     
     resizeBackBuffer(pSampleContext->pRenderContext, newWidth, newHeight);
     doSampleGuiFrame(pSampleContext);
+}
+
+void windowDoubleClick(HWND hwnd, LPARAM lparam)
+{
+    sample_context_t* pSampleContext = (sample_context_t*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    if(pSampleContext == nullptr)
+    {
+        return;
+    }
+
+    POINT mousePos = {};
+    mousePos.x = LOWORD(lparam);
+    mousePos.y = HIWORD(lparam);
+    ScreenToClient(hwnd, &mousePos);
+
+    const int titleBarHeight = (int)(ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2.0f);
+    const bool doubleClickInTitleBar = mousePos.y < titleBarHeight;
+
+    if( doubleClickInTitleBar )
+    {
+        pSampleContext->imguiState.mainWindowMaximized = true;
+    }
 }
 
 void windowResizing(HWND hwnd, WPARAM wparam, LPARAM lparam)
@@ -349,7 +370,7 @@ void windowChanged(HWND hwnd, LPARAM lparam)
     writeWindowParametersToRegistry(&windowParameter);
 }
 
-int dragWindow(HWND hwnd, WPARAM wparam, LPARAM lparam)
+int windowTitleBarMouseCheck(HWND hwnd, WPARAM wparam, LPARAM lparam)
 {
     POINT pt = { LOWORD(lparam), HIWORD(lparam) };
     ScreenToClient(hwnd, &pt);
@@ -414,7 +435,7 @@ LRESULT CALLBACK D3D12TestAppWindowProc(HWND p_HWND, UINT p_Message, WPARAM p_wP
 	switch (p_Message)
 	{
     case WM_NCHITTEST:
-        return dragWindow(p_HWND, p_wParam, p_lParam);
+        return windowTitleBarMouseCheck(p_HWND, p_wParam, p_lParam);
 	case WM_CLOSE:
         DestroyWindow(p_HWND);
 		messageHandled = true;
@@ -425,27 +446,10 @@ LRESULT CALLBACK D3D12TestAppWindowProc(HWND p_HWND, UINT p_Message, WPARAM p_wP
 		messageHandled = true;
         break;
 
-	case WM_KEYDOWN:
-	case WM_KEYUP:
-	case WM_SYSKEYDOWN:
-	case WM_SYSKEYUP:
-		break;
-
-	case WM_LBUTTONUP:
-	case WM_MBUTTONUP:
-	case WM_RBUTTONUP:
-	case WM_XBUTTONUP:
-	case WM_LBUTTONDOWN:
-	case WM_RBUTTONDOWN:
-	case WM_MBUTTONDOWN:
-	case WM_XBUTTONDOWN:
-		break;
-
-	case WM_MOUSEMOVE:
-		break;
-
-	case WM_MOUSEWHEEL:
-		break;
+    case WM_NCLBUTTONDBLCLK:
+        windowDoubleClick(p_HWND, p_lParam);
+        messageHandled = true;
+        break;
     
     case WM_SIZING:
         windowResizing(p_HWND, p_wParam, p_lParam);
@@ -471,7 +475,7 @@ LRESULT CALLBACK D3D12TestAppWindowProc(HWND p_HWND, UINT p_Message, WPARAM p_wP
 HWND setupWindow(HINSTANCE hInstance, int x, int y, int width, int height, const char* pWindowTitle)
 {
 	WNDCLASS wndClass = {0};
-	wndClass.style = CS_HREDRAW | CS_OWNDC | CS_VREDRAW;
+	wndClass.style = CS_HREDRAW | CS_OWNDC | CS_VREDRAW | CS_DBLCLKS;
 	wndClass.hInstance = hInstance;
 	wndClass.lpszClassName = "D3D12RenderWindow";
 	wndClass.lpfnWndProc = D3D12TestAppWindowProc;
