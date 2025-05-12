@@ -5,17 +5,6 @@
 
 #include "..\k15_d3d12_renderer.hpp"
 
-#if 0
-#include "clear_backbuffer\clear_backbuffer_sample.hpp"
-#include "render_triangle\render_triangle_sample.hpp"
-#include "spinning_cube\spinning_cube_sample.hpp"
-#include "compute_texture\compute_texture_sample.hpp"
-#endif
-
-#pragma comment(lib, "Advapi32.lib")
-
-descriptor_heap_t* pImGuiDescriptorHeap = nullptr;
-
 struct sample_imgui_state_t
 {
     bool mainWindowOpen;
@@ -23,24 +12,6 @@ struct sample_imgui_state_t
     bool mainWindowMinimized;
     bool mainWindowIsMaximized;
     bool showSamplesMenu;
-};
-
-struct sample_context_t
-{
-    HWND                    pWindowHandle;
-
-    render_context_t*       pRenderContext;
-    sample_imgui_state_t    imguiState;
-
-    LARGE_INTEGER           performanceFrequency;
-
-    float 				    deltaTimeInMs;
-	float 				    totalFrameTimeInMs;
-
-    uint32_t 			    windowWidth;
-	uint32_t 			    windowHeight;
-
-	uint32_t 			    frameIndex;
 };
 
 struct sample_frame_parameter_t
@@ -52,13 +23,62 @@ struct sample_frame_parameter_t
 	render_target_t* 	    pRenderTarget;
 
     sample_imgui_state_t*   pImGuiState;
-
+    uint32_t*               pActiveSampleIndex;
 	void* 				    pUserData;
 
 	float 				    deltaTimeInMs;
+    float                   totalFrameTimeInMs;
 	uint32_t 			    frameIndex;
     uint32_t                windowWidth;
     uint32_t                windowHeight;
+};
+
+#include "test_base.hpp"
+#include "clear_backbuffer\clear_backbuffer.cpp"
+#include "render_triangle\render_triangle.cpp"
+#include "spinning_cube\spinning_cube.cpp"
+#include "compute_texture\compute_texture.cpp"
+#pragma comment(lib, "Advapi32.lib")
+
+descriptor_heap_t* pImGuiDescriptorHeap = nullptr;
+
+enum sample_type_t : uint8_t
+{
+    clear_background,
+    render_triangle,
+    spinning_cube,
+    compute_texture_sample,
+
+    sample_count
+};
+
+const char* pSampleNames[] = {
+    "Clear Background",
+    "Render Triangle",
+    "Spinning Cube",
+    "Compute Texture"
+};
+static_assert(ARRAY_SIZE(pSampleNames) == sample_type_t::sample_count);
+
+struct sample_context_t
+{
+    HWND                    pWindowHandle;
+
+    memory_allocator_t      allocator;
+    render_context_t*       pRenderContext;
+    sample_imgui_state_t    imguiState;
+
+    void*                   pUserData;
+
+    LARGE_INTEGER           performanceFrequency;
+
+    float 				    deltaTimeInMs;
+	float 				    totalFrameTimeInMs;
+
+    uint32_t 			    windowWidth;
+	uint32_t 			    windowHeight;
+    uint32_t                activeSampleIndex;
+	uint32_t 			    frameIndex;
 };
 
 struct window_parameter_t
@@ -195,7 +215,7 @@ void renderImGui(graphics_frame_t* pGraphicsFrame)
     pImGuiRenderPass->pGpuCommandBuffer->pCommandList->OMSetRenderTargets(1u, &pImGuiRenderPass->pipelineState.pRenderTarget->colorBufferHandle, FALSE, nullptr);
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), pImGuiRenderPass->pGpuCommandBuffer->pCommandList);
     endRenderPass(pGraphicsFrame, pImGuiRenderPass);
-    executeRenderPass(pGraphicsFrame, pImGuiRenderPass);
+    executeRenderPass(pGraphicsFrame, pImGuiRenderPass, render_pass_execution_order_t::push_front);
 }
 
 void startImGuiFrame()
@@ -203,6 +223,72 @@ void startImGuiFrame()
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+}
+
+void shutdownSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_type_t sampleType)
+{
+    switch(sampleType)
+    {
+        case sample_type_t::clear_background:
+            break;
+        case sample_type_t::render_triangle:
+            shutdownRenderTriangleSample(pSampleFrameParameter);
+            break;
+        case sample_type_t::spinning_cube:
+            shutdownSpinningCubeSample(pSampleFrameParameter);
+            break;
+        case sample_type_t::compute_texture_sample:
+            shutdownComputeTextureSample(pSampleFrameParameter);
+            break;
+        case 0xFF:
+            break;
+        default:
+            ASSERT_DEBUG_UNREACHABLE_CODE();
+            break;
+    }
+}
+
+void initSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_type_t sampleType)
+{
+    switch(sampleType)
+    {
+        case sample_type_t::clear_background:
+            break;
+        case sample_type_t::render_triangle:
+            initRenderTriangleSample(pSampleFrameParameter);
+            break;
+        case sample_type_t::spinning_cube:
+            initSpinningCubeSample(pSampleFrameParameter);
+            break;
+        case sample_type_t::compute_texture_sample:
+            initComputeTextureSample(pSampleFrameParameter);
+            break;
+        default:
+            ASSERT_DEBUG_UNREACHABLE_CODE();
+            break;
+    }
+}
+
+void doSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_type_t sampleType, const int x, const int y, const int width, const int height)
+{
+    switch(sampleType)
+    {
+        case sample_type_t::clear_background:
+            doClearBackgroundSample(pSampleFrameParameter, x, y, width, height);
+            break;
+        case sample_type_t::render_triangle:
+            doRenderTriangleSample(pSampleFrameParameter, x, y, width, height);
+            break;
+        case sample_type_t::spinning_cube:
+            doSpinningCubeSample(pSampleFrameParameter, x, y, width, height);
+            break;
+        case sample_type_t::compute_texture_sample:
+            doComputeTextureSample(pSampleFrameParameter, x, y, width, height);
+            break;
+        default:
+            ASSERT_DEBUG_UNREACHABLE_CODE();
+            break;
+    }
 }
 
 void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
@@ -216,19 +302,34 @@ void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
     {
         return;
     }
-
     
     ImGui::SetWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
     ImGui::SetWindowSize(windowSize, ImGuiCond_Always);
 
-    if(ImGui::BeginMenuBar())
+    if(ImGui::BeginTabBar("Samples"))
     {
-        if(ImGui::BeginMenu("Samples", &pImguiState->showSamplesMenu))
+        const float borderSize = ImGui::GetStyle().WindowBorderSize + ImGui::GetStyle().FrameBorderSize + ImGui::GetStyle().FramePadding.x;
+        for(uint32_t sampleIndex = 0u; sampleIndex < sample_type_t::sample_count; ++sampleIndex)
         {
-            ImGui::MenuItem("Bla");
-            ImGui::EndMenu();
+            if(ImGui::BeginTabItem(pSampleNames[sampleIndex]))
+            {
+                if(*pSampleFrameParameter->pActiveSampleIndex != sampleIndex)
+                {
+                    shutdownSample(pSampleFrameParameter, (sample_type_t)*pSampleFrameParameter->pActiveSampleIndex);
+                    initSample(pSampleFrameParameter, (sample_type_t)sampleIndex);
+
+                    *pSampleFrameParameter->pActiveSampleIndex = sampleIndex;
+                }
+
+                const ImVec2 tabItemPos(borderSize, ImGui::GetItemRectMin().y + ImGui::GetFontSize() + ImGui::GetStyle().ItemInnerSpacing.y + ImGui::GetStyle().FramePadding.y);
+                const ImVec2 tabItemSize( (float)pSampleFrameParameter->windowWidth - borderSize * 2.0f, (float)pSampleFrameParameter->windowHeight - (tabItemPos.y + borderSize) );
+
+                //ImGui::GetWindowDrawList()->AddRect(tabItemPos, ImVec2(tabItemPos.x + tabItemSize.x, tabItemPos.y + tabItemSize.y), IM_COL32(255, 255, 0, 255));
+                doSample(pSampleFrameParameter, (sample_type_t)sampleIndex, (int)tabItemPos.x, (int)tabItemPos.y, (int)tabItemSize.x, (int)tabItemSize.y);
+                ImGui::EndTabItem();
+            }
         }
-        ImGui::EndMenuBar();
+        ImGui::EndTabBar();
     }
 
     ImGui::End();
@@ -237,18 +338,24 @@ void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
 void doSampleFrame(sample_context_t* pSampleContext, graphics_frame_t* pGraphicsFrame)
 {
     sample_frame_parameter_t sampleFrameParameter = {};
-    sampleFrameParameter.pWindowHandle  = pSampleContext->pWindowHandle;
-    sampleFrameParameter.pRenderContext = pSampleContext->pRenderContext;
-    sampleFrameParameter.pGraphicsFrame = pGraphicsFrame;
-    sampleFrameParameter.deltaTimeInMs  = pSampleContext->deltaTimeInMs;
-    sampleFrameParameter.frameIndex     = pSampleContext->frameIndex;
-    sampleFrameParameter.windowHeight   = pSampleContext->windowHeight;
-    sampleFrameParameter.windowWidth    = pSampleContext->windowWidth;
-    sampleFrameParameter.pImGuiState    = &pSampleContext->imguiState;
+    sampleFrameParameter.pWindowHandle      = pSampleContext->pWindowHandle;
+    sampleFrameParameter.pRenderContext     = pSampleContext->pRenderContext;
+    sampleFrameParameter.pActiveSampleIndex = &pSampleContext->activeSampleIndex;
+    sampleFrameParameter.pGraphicsFrame     = pGraphicsFrame;
+    sampleFrameParameter.deltaTimeInMs      = pSampleContext->deltaTimeInMs;
+    sampleFrameParameter.frameIndex         = pSampleContext->frameIndex;
+    sampleFrameParameter.windowHeight       = pSampleContext->windowHeight;
+    sampleFrameParameter.windowWidth        = pSampleContext->windowWidth;
+    sampleFrameParameter.pImGuiState        = &pSampleContext->imguiState;
+    sampleFrameParameter.pAllocator         = &pSampleContext->allocator;
+    sampleFrameParameter.pUserData          = pSampleContext->pUserData;
+    sampleFrameParameter.totalFrameTimeInMs = pSampleContext->totalFrameTimeInMs;
 
     startImGuiFrame();
     doGeneralSampleImGuiFrame(&sampleFrameParameter);
     renderImGui(pGraphicsFrame);
+
+    pSampleContext->pUserData = sampleFrameParameter.pUserData;
 }
 
 void handleMainWindowTitleBarLogic(sample_context_t* pSampleContext)
@@ -552,7 +659,10 @@ void sampleMainLoop(HWND pWindowHandle, render_context_t* pRenderContext)
     sampleContext.pWindowHandle = pWindowHandle;
     sampleContext.imguiState.mainWindowOpen = true;
     sampleContext.performanceFrequency = performanceFrequency;
+    sampleContext.activeSampleIndex = ~0;
     
+    createDefaultMemoryAllocator(&sampleContext.allocator);
+
     RECT clientRect = {};
     GetClientRect(pWindowHandle, &clientRect);
     sampleContext.windowWidth = clientRect.right - clientRect.left;

@@ -1,7 +1,4 @@
 
-#include "../../k15_d3d12_renderer.hpp"
-#include "../test_base.hpp"
-
 struct spinning_cube_constant_buffer_data_t
 {
     matrix4x4f_t viewMatrix;
@@ -22,7 +19,7 @@ struct spinning_cube_test_data_t
     gpu_buffer_t* pSpinningCubeConstantBuffer;
 };
 
-void doFrame(test_context_frame_parameter_t* pFrameParameter)
+void doSpinningCubeSample(sample_frame_parameter_t* pFrameParameter, const int x, const int y, const int width, const int height)
 {
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)pFrameParameter->pUserData;
 
@@ -38,7 +35,8 @@ void doFrame(test_context_frame_parameter_t* pFrameParameter)
     freeGpuBuffer(pFrameParameter->pGraphicsFrame, pUploadBuffer);
 
     render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pGraphicsFrame->pBackBuffer);
-    clearColorRenderTarget(pRenderPass, pFrameParameter->pGraphicsFrame->pBackBuffer, 0.0f, 0.0f, 0.0f, 1.0f);
+    setViewport(pRenderPass, x, y, width, height, 0.0f, 100.f);
+    setScissor(pRenderPass, x, y, width, height);
     
     bindGraphicsPipeline(pRenderPass, pTestData->pMaterial->pGraphicsPipeline);
     bindConstantBuffer(pRenderPass, pTestData->pSpinningCubeConstantBuffer, 0u, 0u);
@@ -50,15 +48,15 @@ void doFrame(test_context_frame_parameter_t* pFrameParameter)
     executeRenderPass(pFrameParameter->pGraphicsFrame, pRenderPass);
 }
 
-bool initTest(test_context_frame_parameter_t* pFrameParameter)
+bool initSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 {
     shader_compilation_parameters_t vs_para = {};
     vs_para.pEntryPoint = "main";
-    vs_para.pFilePath = "vertex_shader.hlsl";
+    vs_para.pFilePath = "spinning_cube/vertex_shader.hlsl";
     vs_para.pShaderProfile = "vs_6_0";
 
     shader_compilation_parameters_t ps_para = vs_para;
-    ps_para.pFilePath = "pixel_shader.hlsl";
+    ps_para.pFilePath = "spinning_cube/pixel_shader.hlsl";
     ps_para.pShaderProfile = "ps_6_0";
 
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)allocateFromAllocator(pFrameParameter->pAllocator, sizeof(spinning_cube_test_data_t), alloc_flags_t::clear_memory);
@@ -74,7 +72,7 @@ bool initTest(test_context_frame_parameter_t* pFrameParameter)
         return false;
     }
 
-    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
+    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Spinning Cube Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
     if(pMaterial == nullptr)
     {
         freeFromAllocator(pFrameParameter->pAllocator, pTestData);
@@ -83,7 +81,7 @@ bool initTest(test_context_frame_parameter_t* pFrameParameter)
     }
 
     int textureWidth = 0, textureHeight = 0, channelsInTexture = 0;
-    const stbi_uc* pImageData = stbi_load("smiley.png", &textureWidth, &textureHeight, &channelsInTexture, 4);
+    const stbi_uc* pImageData = stbi_load("spinning_cube/smiley.png", &textureWidth, &textureHeight, &channelsInTexture, 4);
 
     setIdentityMatrix(&pTestData->spinningCubeData.modelMatrix);
 
@@ -117,32 +115,13 @@ bool initTest(test_context_frame_parameter_t* pFrameParameter)
     return true;
 }
 
-void shutdownTest(test_context_frame_parameter_t* pFrameParameter)
+void shutdownSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 {
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)pFrameParameter->pUserData;
     freeGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffer);
     freeGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
 
-    destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
+    //destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyIndexedMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);
     freeFromAllocator(pFrameParameter->pAllocator, pTestData);
-}
-
-int CALLBACK WinMain(HINSTANCE hInstance,
-	HINSTANCE hPrevInstance,
-	LPSTR lpCmdLine, int nShowCmd)
-{
-    test_context_parameters_t parameters = {};
-    parameters.useDebugLayer = true;
-    parameters.pFrameCallback = doFrame;
-    parameters.pInitCallback = initTest;
-    parameters.pShutdownCallback = shutdownTest;
-
-    result_t<test_context_t*> testContextResult = initTestEnvironmentAndWindow(hInstance, 1024, 768, "[DX12] spinning cube", &parameters);
-    if(!isResultSuccessful(testContextResult))
-    {
-        return -1;
-    }
-
-    return startTest(testContextResult.value);
 }

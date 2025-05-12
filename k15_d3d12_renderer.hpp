@@ -1715,7 +1715,7 @@ void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
             ZeroMemory(pGraphicsPipelineStateToFree, sizeof(graphics_pipeline_t));
 
             pGraphicsPipelineStateToFree = pNextGraphicsPipelineStateToFree;
-
+            
             //TODO
             //FK: Remove graphics pipeline entry from hash map
         }
@@ -4365,9 +4365,12 @@ void applyPipelineState(gpu_command_buffer_t* pCommandBuffer, graphics_frame_t* 
     {
         applyViewport(pCommandBuffer, &pGraphicsFrame->pipelineState, &pPipelineState->viewport);
         applyScissor(pCommandBuffer, &pGraphicsFrame->pipelineState, &pPipelineState->scissor);
-        applyGraphicsPipeline(pCommandBuffer, &pGraphicsFrame->pipelineState, pPipelineState->pGraphicsPipeline);
         applyRenderTarget(pCommandBuffer, &pGraphicsFrame->pipelineState, pPipelineState->pRenderTarget);
-        applyBoundPipelineResources(pCommandBuffer, pGraphicsFrame->pipelineState.pGraphicsPipeline->pShaderBindingPoints, pGraphicsFrame->pipelineState.pGraphicsPipeline->shaderBindingPointCount, &pGraphicsFrame->pipelineState, &pGraphicsFrame->pipelineState.resourcesAreDependingOnCopyPass, pPipelineState->boundResources + boundResourcesOffset, pPipelineState->resourceBindingCount[pipelineType], pipelineType);
+        if(pPipelineState->pGraphicsPipeline != nullptr)
+        {
+            applyGraphicsPipeline(pCommandBuffer, &pGraphicsFrame->pipelineState, pPipelineState->pGraphicsPipeline);
+            applyBoundPipelineResources(pCommandBuffer, pGraphicsFrame->pipelineState.pGraphicsPipeline->pShaderBindingPoints, pGraphicsFrame->pipelineState.pGraphicsPipeline->shaderBindingPointCount, &pGraphicsFrame->pipelineState, &pGraphicsFrame->pipelineState.resourcesAreDependingOnCopyPass, pPipelineState->boundResources + boundResourcesOffset, pPipelineState->resourceBindingCount[pipelineType], pipelineType);
+        }
     }
     else if(pipelineType == pipeline_type_t::compute_pipeline)
     {
@@ -4378,7 +4381,6 @@ void applyPipelineState(gpu_command_buffer_t* pCommandBuffer, graphics_frame_t* 
     {
         ASSERT_DEBUG_UNREACHABLE_CODE();
     }
-
 }
 
 void draw(render_pass_t* pRenderPass, const uint32_t vertexOffset, const uint32_t vertexCount)
@@ -4399,6 +4401,32 @@ void dispatch(render_pass_t* pRenderPass, uint32_t dispatchX, uint32_t dispatchY
     pRenderPass->pGpuCommandBuffer->pCommandList->Dispatch(dispatchX, dispatchY, dispatchZ);
 }
 
+void setViewport(render_pass_t* pRenderPass, const int x, const int y, const int width, const int height, const float minDepth, const float maxDepth)
+{
+    ASSERT_DEBUG(pRenderPass != nullptr);
+    ASSERT_DEBUG(width > 0);
+    ASSERT_DEBUG(height > 0);
+    
+    pRenderPass->pipelineState.viewport.x = x;
+    pRenderPass->pipelineState.viewport.y = y;
+    pRenderPass->pipelineState.viewport.width = width;
+    pRenderPass->pipelineState.viewport.height = height;
+    pRenderPass->pipelineState.viewport.minDepth = minDepth;
+    pRenderPass->pipelineState.viewport.minDepth = maxDepth;
+}
+
+void setScissor(render_pass_t* pRenderPass, const int x, const int y, const int width, const int height)
+{
+    ASSERT_DEBUG(pRenderPass != nullptr);
+    ASSERT_DEBUG(width > 0);
+    ASSERT_DEBUG(height > 0);
+
+    pRenderPass->pipelineState.scissor.x = x;
+    pRenderPass->pipelineState.scissor.y = y;
+    pRenderPass->pipelineState.scissor.width = width;
+    pRenderPass->pipelineState.scissor.height = height;
+}
+
 void clearColorRenderTarget(render_pass_t* pRenderPass, render_target_t* pRenderTarget, const float r, const float g, const float b, const float a)
 {
     ASSERT_DEBUG(pRenderTarget != nullptr);
@@ -4408,6 +4436,7 @@ void clearColorRenderTarget(render_pass_t* pRenderPass, render_target_t* pRender
 
     const FLOAT colorValues[4] = {r, g, b, a};
 
+    applyPipelineState(pRenderPass->pGpuCommandBuffer, pRenderPass->pGraphicsFrame, &pRenderPass->pipelineState, pipeline_type_t::graphics_pipeline);
     pRenderPass->pGpuCommandBuffer->pCommandList->ClearRenderTargetView(pRenderTarget->colorBufferHandle, colorValues, 0, nullptr);
 }
 
@@ -4976,7 +5005,7 @@ NO_DISCARD gpu_texture_view_t* createGpuTextureViewForTexture(graphics_frame_t* 
 NO_DISCARD gpu_texture_t* createGpuTexture(graphics_frame_t* pGraphicsFrame, uint3_t dimensions, const uint8_t mipMapLevels, const void* pInitialData, flags8_t<gpu_texture_usage_flag_t> textureUsageFlags, gpu_texture_format_t format, gpu_texture_format_type_t formatType, gpu_memory_usage_hint_t memoryUsageHint, const char* pName = "GpuTexture")
 {
     ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(!(dimensions.x == 0 && dimensions.y == 0 && dimensions.z == 0));
+    ASSERT_DEBUG(dimensions.x != 0);
 
     dimensions.y = dimensions.y == 0u ? 1u : dimensions.y;
     dimensions.z = dimensions.z == 0u ? 1u : dimensions.z;

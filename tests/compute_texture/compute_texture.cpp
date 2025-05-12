@@ -1,16 +1,5 @@
 
 
-#include "../../k15_d3d12_renderer.hpp"
-#include "../test_base.hpp"
-
-struct spinning_cube_constant_buffer_data_t
-{
-    matrix4x4f_t viewMatrix;
-    matrix4x4f_t projMatrix;
-    matrix4x4f_t viewProjMatrix;
-    matrix4x4f_t modelMatrix;
-};
-
 struct compute_texture_data_t
 {
     uint32_t textureWidth;
@@ -40,7 +29,7 @@ struct compute_texture_test_data_t
     compute_pipeline_t* pComputePipeline;
 };
 
-void doFrame(test_context_frame_parameter_t* pFrameParameter)
+void doComputeTextureSample(sample_frame_parameter_t* pFrameParameter, const int x, const int y, const int width, const int height)
 {
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)pFrameParameter->pUserData;
 
@@ -94,7 +83,8 @@ void doFrame(test_context_frame_parameter_t* pFrameParameter)
     executeRenderPass(pFrameParameter->pGraphicsFrame, pComputePass);
 
     render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pGraphicsFrame->pBackBuffer);
-    clearColorRenderTarget(pRenderPass, pFrameParameter->pGraphicsFrame->pBackBuffer, 0.0f, 0.0f, 0.0f, 1.0f);
+    setViewport(pRenderPass, x, y, width, height, 0.0f, 100.f);
+    setScissor(pRenderPass, x, y, width, height);
     bindGraphicsPipeline(pRenderPass, pTestData->pMaterial->pGraphicsPipeline);
     bindConstantBuffer(pRenderPass, pTestData->pSpinningCubeConstantBuffers[onlineBufferIndex], 0u, 0u);
     bindTextureSampler(pRenderPass, pTestData->pSampler, 0u, 1u);
@@ -107,19 +97,19 @@ void doFrame(test_context_frame_parameter_t* pFrameParameter)
     setRenderPassDependency(pFrameParameter->pGraphicsFrame, pRenderPass, pComputePass);
 }
 
-bool initTest(test_context_frame_parameter_t* pFrameParameter)
+bool initComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 {
     shader_compilation_parameters_t vs_para = {};
     vs_para.pEntryPoint = "main";
-    vs_para.pFilePath = "vertex_shader.hlsl";
+    vs_para.pFilePath = "compute_texture/vertex_shader.hlsl";
     vs_para.pShaderProfile = "vs_6_0";
 
     shader_compilation_parameters_t ps_para = vs_para;
-    ps_para.pFilePath = "pixel_shader.hlsl";
+    ps_para.pFilePath = "compute_texture/pixel_shader.hlsl";
     ps_para.pShaderProfile = "ps_6_0";
 
     shader_compilation_parameters_t cs_para = vs_para;
-    cs_para.pFilePath = "compute_shader.hlsl";
+    cs_para.pFilePath = "compute_texture/compute_shader.hlsl";
     cs_para.pShaderProfile = "cs_6_0";
 
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)allocateFromAllocator(pFrameParameter->pAllocator, sizeof(compute_texture_test_data_t), alloc_flags_t::clear_memory);
@@ -135,7 +125,7 @@ bool initTest(test_context_frame_parameter_t* pFrameParameter)
         return false;
     }
 
-    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
+    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Compute Texture Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
     if(pMaterial == nullptr)
     {
         freeFromAllocator(pFrameParameter->pAllocator, pTestData);
@@ -185,33 +175,14 @@ bool initTest(test_context_frame_parameter_t* pFrameParameter)
     return true;
 }
 
-void shutdownTest(test_context_frame_parameter_t* pFrameParameter)
+void shutdownComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 {
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)pFrameParameter->pUserData;
     freeGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[0]);
     freeGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[1]);
     freeGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
 
-    destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
+    //destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyIndexedMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);
     freeFromAllocator(pFrameParameter->pAllocator, pTestData);
-}
-
-int CALLBACK WinMain(HINSTANCE hInstance,
-	HINSTANCE hPrevInstance,
-	LPSTR lpCmdLine, int nShowCmd)
-{
-    test_context_parameters_t parameters = {};
-    parameters.useDebugLayer = true;
-    parameters.pFrameCallback = doFrame;
-    parameters.pInitCallback = initTest;
-    parameters.pShutdownCallback = shutdownTest;
-
-    result_t<test_context_t*> testContextResult = initTestEnvironmentAndWindow(hInstance, 1024, 768, "[DX12] compute texture", &parameters);
-    if(!isResultSuccessful(testContextResult))
-    {
-        return -1;
-    }
-
-    return startTest(testContextResult.value);
 }
