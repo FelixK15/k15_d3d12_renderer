@@ -68,6 +68,13 @@ struct sample_context_t
     render_context_t*       pRenderContext;
     sample_imgui_state_t    imguiState;
 
+    graphics_pipeline_t*    pSampleRenderGraphicsPipeline;
+    vertex_format_t*        pSampleRenderQuadVertexFormat;
+    texture_sampler_t*      pSampler;
+    gpu_buffer_t*           pSampleRenderQuadVertexBuffer;
+    gpu_texture_t*          pSampleRenderTargetTexture;
+    render_target_t*        pSampleRenderTarget;
+
     void*                   pUserData;
 
     LARGE_INTEGER           performanceFrequency;
@@ -75,10 +82,14 @@ struct sample_context_t
     float 				    deltaTimeInMs;
 	float 				    totalFrameTimeInMs;
 
+    uint32_t                newWindowWidth;
+    uint32_t                newWindowHeight;
     uint32_t 			    windowWidth;
 	uint32_t 			    windowHeight;
     uint32_t                activeSampleIndex;
 	uint32_t 			    frameIndex;
+
+    bool                    initialized;
 };
 
 struct window_parameter_t
@@ -212,7 +223,7 @@ void renderImGui(graphics_frame_t* pGraphicsFrame)
     render_pass_t* pImGuiRenderPass = startRenderPass(pGraphicsFrame, "ImGui Pass", pGraphicsFrame->pBackBuffer);
     clearColorRenderTarget(pImGuiRenderPass, pGraphicsFrame->pBackBuffer, 1.0f, 1.0f, 1.0f, 1.0f);
     pImGuiRenderPass->pGpuCommandBuffer->pCommandList->SetDescriptorHeaps(1u, &pImGuiDescriptorHeap->pDescriptorHeap);
-    pImGuiRenderPass->pGpuCommandBuffer->pCommandList->OMSetRenderTargets(1u, &pImGuiRenderPass->pipelineState.pRenderTarget->colorBufferHandle, FALSE, nullptr);
+    pImGuiRenderPass->pGpuCommandBuffer->pCommandList->OMSetRenderTargets(1u, &pImGuiRenderPass->currentPipelineState.pRenderTarget->colorBufferDescriptorHandle.cpuDescriptorHandle, FALSE, nullptr);
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), pImGuiRenderPass->pGpuCommandBuffer->pCommandList);
     endRenderPass(pGraphicsFrame, pImGuiRenderPass);
     executeRenderPass(pGraphicsFrame, pImGuiRenderPass, render_pass_execution_order_t::push_front);
@@ -269,21 +280,21 @@ void initSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_ty
     }
 }
 
-void doSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_type_t sampleType, const int x, const int y, const int width, const int height)
+void doSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_type_t sampleType)
 {
     switch(sampleType)
     {
         case sample_type_t::clear_background:
-            doClearBackgroundSample(pSampleFrameParameter, x, y, width, height);
+            doClearBackgroundSample(pSampleFrameParameter);
             break;
         case sample_type_t::render_triangle:
-            doRenderTriangleSample(pSampleFrameParameter, x, y, width, height);
+            doRenderTriangleSample(pSampleFrameParameter);
             break;
         case sample_type_t::spinning_cube:
-            doSpinningCubeSample(pSampleFrameParameter, x, y, width, height);
+            doSpinningCubeSample(pSampleFrameParameter);
             break;
         case sample_type_t::compute_texture_sample:
-            doComputeTextureSample(pSampleFrameParameter, x, y, width, height);
+            doComputeTextureSample(pSampleFrameParameter);
             break;
         default:
             ASSERT_DEBUG_UNREACHABLE_CODE();
@@ -308,7 +319,6 @@ void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
 
     if(ImGui::BeginTabBar("Samples"))
     {
-        const float borderSize = ImGui::GetStyle().WindowBorderSize + ImGui::GetStyle().FrameBorderSize + ImGui::GetStyle().FramePadding.x;
         for(uint32_t sampleIndex = 0u; sampleIndex < sample_type_t::sample_count; ++sampleIndex)
         {
             if(ImGui::BeginTabItem(pSampleNames[sampleIndex]))
@@ -321,11 +331,7 @@ void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
                     *pSampleFrameParameter->pActiveSampleIndex = sampleIndex;
                 }
 
-                const ImVec2 tabItemPos(borderSize, ImGui::GetItemRectMin().y + ImGui::GetFontSize() + ImGui::GetStyle().ItemInnerSpacing.y + ImGui::GetStyle().FramePadding.y);
-                const ImVec2 tabItemSize( (float)pSampleFrameParameter->windowWidth - borderSize * 2.0f, (float)pSampleFrameParameter->windowHeight - (tabItemPos.y + borderSize) );
-
-                //ImGui::GetWindowDrawList()->AddRect(tabItemPos, ImVec2(tabItemPos.x + tabItemSize.x, tabItemPos.y + tabItemSize.y), IM_COL32(255, 255, 0, 255));
-                doSample(pSampleFrameParameter, (sample_type_t)sampleIndex, (int)tabItemPos.x, (int)tabItemPos.y, (int)tabItemSize.x, (int)tabItemSize.y);
+                doSample(pSampleFrameParameter, (sample_type_t)sampleIndex);
                 ImGui::EndTabItem();
             }
         }
@@ -333,6 +339,20 @@ void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
     }
 
     ImGui::End();
+}
+
+void renderSampleRenderTarget(sample_context_t* pSampleContext, graphics_frame_t* pGraphicsFrame)
+{
+    render_pass_t* pSampleRenderPass = startRenderPass(pGraphicsFrame, "sample rendering", pGraphicsFrame->pBackBuffer);
+    setScissor(pSampleRenderPass, 0, 0, pSampleContext->windowWidth, pSampleContext->windowHeight);
+    setViewport(pSampleRenderPass, 0, 0, pSampleContext->windowWidth, pSampleContext->windowHeight, 0.0f, 100.0f);
+    bindVertexBuffer(pSampleRenderPass, pSampleContext->pSampleRenderQuadVertexBuffer, pSampleContext->pSampleRenderQuadVertexFormat, 0u);
+    bindGraphicsPipeline(pSampleRenderPass, pSampleContext->pSampleRenderGraphicsPipeline);
+    bindTextureSampler(pSampleRenderPass, pSampleContext->pSampler, 0u, 1u);
+    bindTexture(pSampleRenderPass, pSampleContext->pSampleRenderTargetTexture, 0u, 2u);
+    draw(pSampleRenderPass, 0u, 6u);
+    endRenderPass(pGraphicsFrame, pSampleRenderPass);
+    executeRenderPass(pGraphicsFrame, pSampleRenderPass);
 }
 
 void doSampleFrame(sample_context_t* pSampleContext, graphics_frame_t* pGraphicsFrame)
@@ -350,10 +370,12 @@ void doSampleFrame(sample_context_t* pSampleContext, graphics_frame_t* pGraphics
     sampleFrameParameter.pAllocator         = &pSampleContext->allocator;
     sampleFrameParameter.pUserData          = pSampleContext->pUserData;
     sampleFrameParameter.totalFrameTimeInMs = pSampleContext->totalFrameTimeInMs;
+    sampleFrameParameter.pRenderTarget      = pSampleContext->pSampleRenderTarget;
 
     startImGuiFrame();
     doGeneralSampleImGuiFrame(&sampleFrameParameter);
     renderImGui(pGraphicsFrame);
+    renderSampleRenderTarget(pSampleContext, pGraphicsFrame);
 
     pSampleContext->pUserData = sampleFrameParameter.pUserData;
 }
@@ -388,12 +410,136 @@ void handleMainWindowTitleBarLogic(sample_context_t* pSampleContext)
     }
 }
 
+void resizeSampleRenderTarget(sample_context_t* pSampleContext, graphics_frame_t* pGraphicsFrame, const float width, const float height)
+{
+    if(pSampleContext->pSampleRenderTargetTexture != nullptr)
+    {
+        freeGpuTexture(pGraphicsFrame, pSampleContext->pSampleRenderTargetTexture);
+        pSampleContext->pSampleRenderTargetTexture = nullptr;
+    }
+
+    if(pSampleContext->pSampleRenderTarget != nullptr)
+    {
+        freeRenderTarget(pGraphicsFrame, pSampleContext->pSampleRenderTarget);
+        pSampleContext->pSampleRenderTarget = nullptr;
+    }
+
+    const uint3_t renderTargetDimension = createUint3((uint32_t)width, (uint32_t)height, 1u);
+    pSampleContext->pSampleRenderTargetTexture = createGpuTexture(pGraphicsFrame, renderTargetDimension, 0u, nullptr, gpu_texture_usage_flag_t::color_render_target | gpu_texture_usage_flag_t::shader_resource_view, gpu_texture_format_t::R8G8B8A8, gpu_texture_format_type_t::normalized_unsigned_int, "SampleRenderTarget");
+    pSampleContext->pSampleRenderTarget = createRenderTarget(pGraphicsFrame, renderTargetDimension, pSampleContext->pSampleRenderTargetTexture, nullptr);
+}
+
+void createSampleRenderQuad(sample_context_t* pSampleContext, graphics_frame_t* pGraphicsFrame, const float x, const float y, const float width, const float height, const float windowWidth, const float windowHeight)
+{
+    if(pSampleContext->pSampleRenderQuadVertexBuffer != nullptr)
+    {
+        freeGpuBuffer(pGraphicsFrame, pSampleContext->pSampleRenderQuadVertexBuffer);
+        pSampleContext->pSampleRenderQuadVertexBuffer = nullptr;
+    }
+
+    const float left = 2.0f * (x / windowWidth) - 1.0f;
+    const float right = 2.0f * ((x + width) / windowWidth) - 1.0f;
+    const float top = 2.0f * (1.0f - y / windowHeight) - 1.0f;
+    const float bottom = 2.0f * (1.0f - (y + height) / windowHeight) - 1.0f;
+
+#if 0
+    const float one = 0.5f;
+
+    const float left = -one;
+    const float right = one;
+    const float top = one;
+    const float bottom = -one;
+#endif
+    const float quadVertices[] = {
+        right, top,
+        1.0f, 0.0f,
+
+        right, bottom,
+        1.0f, 1.0f,
+
+        left, bottom,
+        0.0f, 1.0f,
+
+        left, bottom,
+        0.0f, 1.0f,
+
+        left, top,
+        0.0f, 0.0f,
+
+        right, top,
+        1.0f, 0.0f
+    };
+
+    pSampleContext->pSampleRenderQuadVertexBuffer = createGpuBuffer(pGraphicsFrame, sizeof(quadVertices), quadVertices, gpu_buffer_usage_flag_t::vertex_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "SampleQuadVertices");
+}
+
 void doSampleGuiFrame(sample_context_t* pSampleContext)
 {
     LARGE_INTEGER endTime, startTime;
 
     QueryPerformanceCounter(&startTime);
     graphics_frame_t* pGraphicsFrame = beginNextFrame(pSampleContext->pRenderContext);
+
+    if(!pSampleContext->initialized)
+    {
+        vertex_attribute_entry_t vertexAttributes[] = {
+            {vertex_attribute_t::position, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 2u},
+            {vertex_attribute_t::texcoord, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 2u}
+        };
+        pSampleContext->pSampleRenderQuadVertexFormat = createVertexFormat(pGraphicsFrame, vertexAttributes, 2u);
+        
+        shader_compilation_parameters_t vertexShaderParameters = {};
+        vertexShaderParameters.pEntryPoint = "main";
+        vertexShaderParameters.pFilePath = "sample_vertex_shader.hlsl";
+        vertexShaderParameters.pShaderProfile = "vs_6_0";
+
+        shader_compilation_parameters_t fragmentShaderParameters = vertexShaderParameters;
+        fragmentShaderParameters.pFilePath = "sample_pixel_shader.hlsl";
+        fragmentShaderParameters.pShaderProfile = "ps_6_0";
+
+        graphics_pipeline_parameters_t pipelineParameter = {};
+        pipelineParameter.pName = "SampleQuad";
+        pipelineParameter.pVertexShader = loadAndCompileShaderCodeFromFile(pGraphicsFrame, &vertexShaderParameters, shader_type_flag_t::vertex_shader);
+        pipelineParameter.pPixelShader = loadAndCompileShaderCodeFromFile(pGraphicsFrame, &fragmentShaderParameters, shader_type_flag_t::pixel_shader);
+        pipelineParameter.topology = topology_t::triangle_list;
+        pipelineParameter.pVertexFormat = pSampleContext->pSampleRenderQuadVertexFormat;
+
+        texture_sampler_parameter_t samplerParameters = {};
+        samplerParameters.addressModeU = texture_sampler_address_mode_type_t::mirror;
+        samplerParameters.addressModeV = texture_sampler_address_mode_type_t::mirror;
+        samplerParameters.addressModeW = texture_sampler_address_mode_type_t::mirror;
+        samplerParameters.magnificationFilter = texture_sampler_filter_type_t::point;
+        samplerParameters.minifactionFilter = texture_sampler_filter_type_t::point;
+        pSampleContext->pSampler = createTextureSampler(pGraphicsFrame, &samplerParameters);
+        pSampleContext->pSampleRenderGraphicsPipeline = createGraphicsPipeline(pGraphicsFrame, &pipelineParameter);
+        pSampleContext->initialized = true;
+    }
+
+    if(pSampleContext->newWindowHeight != pSampleContext->windowHeight || pSampleContext->newWindowWidth != pSampleContext->windowWidth || pSampleContext->frameIndex == 1u)
+    {
+        pSampleContext->windowWidth = pSampleContext->newWindowWidth;
+        pSampleContext->windowHeight = pSampleContext->newWindowHeight;
+        
+        ImGuiStyle* pGuiStyle = &ImGui::GetStyle();
+        const float guiFontSize = ImGui::GetFontSize();
+        const float borderSize = pGuiStyle->WindowBorderSize + pGuiStyle->FrameBorderSize + pGuiStyle->FramePadding.x;
+        const float tabItemX = borderSize;
+        const float tabItemWidth = pSampleContext->windowWidth - borderSize * 2.0f;
+
+        //window title
+        float tabItemY = guiFontSize + pGuiStyle->WindowBorderSize + pGuiStyle->FrameBorderSize + pGuiStyle->FramePadding.y * 2.0f;
+        //window menu bar
+        tabItemY += guiFontSize + pGuiStyle->ItemSpacing.y + pGuiStyle->FrameBorderSize + pGuiStyle->FramePadding.y * 2.0f;
+        //tab header
+        tabItemY += guiFontSize + pGuiStyle->ItemSpacing.y + pGuiStyle->FrameBorderSize + pGuiStyle->FramePadding.y * 2.0f;
+        //tab content
+        tabItemY += pGuiStyle->FramePadding.y + pGuiStyle->FrameBorderSize;
+
+        const float tabItemHeight = pSampleContext->windowHeight - (tabItemY + borderSize);
+        resizeSampleRenderTarget(pSampleContext, pGraphicsFrame, tabItemWidth, tabItemHeight);
+        createSampleRenderQuad(pSampleContext, pGraphicsFrame, tabItemX, tabItemY, tabItemWidth, tabItemHeight, (float)pSampleContext->windowWidth, (float)pSampleContext->windowHeight);
+    }
+
     doSampleFrame(pSampleContext, pGraphicsFrame);
     finishFrame(pSampleContext->pRenderContext, pGraphicsFrame);
     QueryPerformanceCounter(&endTime);
@@ -409,9 +555,9 @@ void doSampleGuiFrame(sample_context_t* pSampleContext)
 
 void handleWindowResize(sample_context_t* pSampleContext, const uint32_t newWidth, const uint32_t newHeight)
 {
-    pSampleContext->windowWidth = newWidth;
-    pSampleContext->windowHeight = newHeight;
-    
+    pSampleContext->newWindowWidth = newWidth;
+    pSampleContext->newWindowHeight = newHeight;
+
     resizeBackBuffer(pSampleContext->pRenderContext, newWidth, newHeight);
     doSampleGuiFrame(pSampleContext);
 }
@@ -655,6 +801,7 @@ void sampleMainLoop(HWND pWindowHandle, render_context_t* pRenderContext)
 	QueryPerformanceFrequency(&performanceFrequency);
 
     sample_context_t sampleContext = {};
+    sampleContext.initialized = false;
     sampleContext.pRenderContext = pRenderContext;
     sampleContext.pWindowHandle = pWindowHandle;
     sampleContext.imguiState.mainWindowOpen = true;
@@ -665,8 +812,8 @@ void sampleMainLoop(HWND pWindowHandle, render_context_t* pRenderContext)
 
     RECT clientRect = {};
     GetClientRect(pWindowHandle, &clientRect);
-    sampleContext.windowWidth = clientRect.right - clientRect.left;
-    sampleContext.windowHeight = clientRect.bottom - clientRect.top;
+    sampleContext.newWindowWidth = clientRect.right - clientRect.left;
+    sampleContext.newWindowHeight = clientRect.bottom - clientRect.top;
 
     SetWindowLongPtrA(pWindowHandle, GWLP_USERDATA, (LONG_PTR)&sampleContext);
     while(true)
@@ -726,7 +873,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         return -1;
     }
 
-    if(!createDescriptorHeap(pImGuiDescriptorHeap, renderContext.pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 32))
+    if(!createDescriptorHeap(pImGuiDescriptorHeap, &renderContext.defaultAllocator, renderContext.pDevice, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 32))
     {
         return -1;
     }

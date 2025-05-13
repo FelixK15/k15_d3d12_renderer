@@ -29,7 +29,7 @@ struct compute_texture_test_data_t
     compute_pipeline_t* pComputePipeline;
 };
 
-void doComputeTextureSample(sample_frame_parameter_t* pFrameParameter, const int x, const int y, const int width, const int height)
+void doComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 {
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)pFrameParameter->pUserData;
 
@@ -82,9 +82,8 @@ void doComputeTextureSample(sample_frame_parameter_t* pFrameParameter, const int
     endRenderPass(pFrameParameter->pGraphicsFrame, pComputePass);
     executeRenderPass(pFrameParameter->pGraphicsFrame, pComputePass);
 
-    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pGraphicsFrame->pBackBuffer);
-    setViewport(pRenderPass, x, y, width, height, 0.0f, 100.f);
-    setScissor(pRenderPass, x, y, width, height);
+    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pRenderTarget);
+    clearColorRenderTarget(pRenderPass, pFrameParameter->pRenderTarget, 1.0f, 1.0f, 1.0f, 1.0f);
     bindGraphicsPipeline(pRenderPass, pTestData->pMaterial->pGraphicsPipeline);
     bindConstantBuffer(pRenderPass, pTestData->pSpinningCubeConstantBuffers[onlineBufferIndex], 0u, 0u);
     bindTextureSampler(pRenderPass, pTestData->pSampler, 0u, 1u);
@@ -164,7 +163,7 @@ bool initComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
     pTestData->pComputeConstBuffers[1] = createGpuBuffer(pFrameParameter->pGraphicsFrame, sizeof(compute_texture_data_t), &pTestData->computeTextureData, gpu_buffer_usage_flag_t::constant_buffer, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, "Compute Texture Data");
     pTestData->pSpinningCubeConstantBuffers[0] = createGpuBuffer(pFrameParameter->pGraphicsFrame, sizeof(spinning_cube_constant_buffer_data_t), nullptr, gpu_buffer_usage_flag_t::constant_buffer, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, "Spinning Cube Constant Buffer");
     pTestData->pSpinningCubeConstantBuffers[1] = createGpuBuffer(pFrameParameter->pGraphicsFrame, sizeof(spinning_cube_constant_buffer_data_t), nullptr, gpu_buffer_usage_flag_t::constant_buffer, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, "Spinning Cube Constant Buffer");
-    pTestData->pTexture = createGpuTexture(pFrameParameter->pGraphicsFrame, createUint3(textureWidth, textureHeight, 1), 1u, nullptr, gpu_texture_usage_flag_t::shader_resource_view, gpu_texture_format_t::R8G8B8A8, gpu_texture_format_type_t::normalized_unsigned_int, gpu_memory_usage_hint_t::gpuExclusiveAccess, "Procedural Texture");
+    pTestData->pTexture = createGpuTexture(pFrameParameter->pGraphicsFrame, createUint3(textureWidth, textureHeight, 1), 1u, nullptr, gpu_texture_usage_flag_t::shader_resource_view, gpu_texture_format_t::R8G8B8A8, gpu_texture_format_type_t::normalized_unsigned_int, "Procedural Texture");
     pTestData->pComputeTextureBuffer = createGpuBuffer(pFrameParameter->pGraphicsFrame, textureWidth * textureHeight * 4, nullptr, gpu_buffer_usage_flag_t::storage_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "ComputeTextureBuffer" );
     pTestData->pComputeShader = loadAndCompileShaderCodeFromFile(pFrameParameter->pGraphicsFrame, &cs_para, shader_type_flag_t::compute_shader);
     pTestData->pComputePipeline = createComputePipeline(pFrameParameter->pGraphicsFrame, pTestData->pComputeShader, "ComputeTexture");

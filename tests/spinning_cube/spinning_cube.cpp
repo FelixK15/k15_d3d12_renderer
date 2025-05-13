@@ -19,7 +19,7 @@ struct spinning_cube_test_data_t
     gpu_buffer_t* pSpinningCubeConstantBuffer;
 };
 
-void doSpinningCubeSample(sample_frame_parameter_t* pFrameParameter, const int x, const int y, const int width, const int height)
+void doSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 {
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)pFrameParameter->pUserData;
 
@@ -34,10 +34,8 @@ void doSpinningCubeSample(sample_frame_parameter_t* pFrameParameter, const int x
     copyGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffer, pUploadBuffer);
     freeGpuBuffer(pFrameParameter->pGraphicsFrame, pUploadBuffer);
 
-    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pGraphicsFrame->pBackBuffer);
-    setViewport(pRenderPass, x, y, width, height, 0.0f, 100.f);
-    setScissor(pRenderPass, x, y, width, height);
-    
+    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pRenderTarget);
+    clearColorRenderTarget(pRenderPass, pFrameParameter->pRenderTarget, 1.0f, 1.0f, 1.0f, 1.0f);
     bindGraphicsPipeline(pRenderPass, pTestData->pMaterial->pGraphicsPipeline);
     bindConstantBuffer(pRenderPass, pTestData->pSpinningCubeConstantBuffer, 0u, 0u);
     bindTextureSampler(pRenderPass, pTestData->pSampler, 0u, 1u);
@@ -106,7 +104,7 @@ bool initSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
     pTestData->spinningCubeData.projMatrix = projectionMatrix;
     pTestData->spinningCubeData.viewProjMatrix = mulMatrices(&viewMatrix, &projectionMatrix);
     pTestData->pSpinningCubeConstantBuffer = createGpuBuffer(pFrameParameter->pGraphicsFrame, sizeof(spinning_cube_constant_buffer_data_t), nullptr, gpu_buffer_usage_flag_t::constant_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess);
-    pTestData->pTexture = createGpuTexture(pFrameParameter->pGraphicsFrame, createUint3(textureWidth, textureHeight, 1), 1u, pImageData, gpu_texture_usage_flag_t::shader_resource_view, gpu_texture_format_t::R8G8B8A8, gpu_texture_format_type_t::normalized_unsigned_int, gpu_memory_usage_hint_t::gpuExclusiveAccess);
+    pTestData->pTexture = createGpuTexture(pFrameParameter->pGraphicsFrame, createUint3(textureWidth, textureHeight, 1), 1u, pImageData, gpu_texture_usage_flag_t::shader_resource_view, gpu_texture_format_t::R8G8B8A8, gpu_texture_format_type_t::normalized_unsigned_int);
 
     pTestData->pMesh = pMesh;
     pTestData->pMaterial = pMaterial;

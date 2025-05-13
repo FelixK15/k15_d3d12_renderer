@@ -5,14 +5,12 @@ struct render_triangle_test_data_t
     material_t* pMaterial;
 };
 
-void doRenderTriangleSample(sample_frame_parameter_t* pFrameParameter, const int x, const int y, const int width, const int height)
+void doRenderTriangleSample(sample_frame_parameter_t* pFrameParameter)
 {
     render_triangle_test_data_t* pTestData = (render_triangle_test_data_t*)pFrameParameter->pUserData;
 
-    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Triangle", pFrameParameter->pGraphicsFrame->pBackBuffer);
-    setViewport(pRenderPass, x, y, width, height, 0.0f, 100.f);
-    setScissor(pRenderPass, x, y, width, height);
-    //clearColorRenderTarget(pRenderPass, pFrameParameter->pGraphicsFrame->pBackBuffer, 0.0f, 0.0f, 0.0f, 1.0f);
+    render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Triangle", pFrameParameter->pRenderTarget);
+    clearColorRenderTarget(pRenderPass, pFrameParameter->pRenderTarget, 0.0f, 0.0f, 0.0f, 1.0f);
     drawMesh(pRenderPass, pTestData->pMesh, pTestData->pMaterial);
 
     endRenderPass(pFrameParameter->pGraphicsFrame, pRenderPass);   
