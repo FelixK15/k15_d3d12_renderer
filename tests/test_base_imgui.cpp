@@ -5,6 +5,44 @@
 
 #include "..\k15_d3d12_renderer.hpp"
 
+const char imguiVertexShader[] = R"(
+struct VertexInput
+{
+    float2 pos : POSITION;
+    float2 uv : TEXCOORD;
+};
+
+struct VertexOutput
+{
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD;
+};
+
+VertexOutput main(VertexInput vertexInput)
+{
+    VertexOutput output;
+    output.pos = float4(vertexInput.pos.x, vertexInput.pos.y, 0.0f, 1.0f);
+    output.uv = vertexInput.uv;
+    return output;
+}
+)";
+
+const char imguiPixelShader[] = R"(
+SamplerState mySampler : register(s0, space1);
+Texture2D texture : register(t0, space2);
+
+struct PixelInput
+{
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD;
+};
+
+float4 main(PixelInput input) : SV_Target
+{
+    return texture.Sample(mySampler, input.uv);
+}
+)";
+
 struct sample_imgui_state_t
 {
     bool mainWindowOpen;
@@ -414,13 +452,13 @@ void resizeSampleRenderTarget(sample_context_t* pSampleContext, graphics_frame_t
 {
     if(pSampleContext->pSampleRenderTargetTexture != nullptr)
     {
-        freeGpuTexture(pGraphicsFrame, pSampleContext->pSampleRenderTargetTexture);
+        releaseGpuTexture(pGraphicsFrame, pSampleContext->pSampleRenderTargetTexture);
         pSampleContext->pSampleRenderTargetTexture = nullptr;
     }
 
     if(pSampleContext->pSampleRenderTarget != nullptr)
     {
-        freeRenderTarget(pGraphicsFrame, pSampleContext->pSampleRenderTarget);
+        releaseRenderTarget(pGraphicsFrame, pSampleContext->pSampleRenderTarget);
         pSampleContext->pSampleRenderTarget = nullptr;
     }
 
@@ -433,7 +471,7 @@ void createSampleRenderQuad(sample_context_t* pSampleContext, graphics_frame_t* 
 {
     if(pSampleContext->pSampleRenderQuadVertexBuffer != nullptr)
     {
-        freeGpuBuffer(pGraphicsFrame, pSampleContext->pSampleRenderQuadVertexBuffer);
+        releaseGpuBuffer(pGraphicsFrame, pSampleContext->pSampleRenderQuadVertexBuffer);
         pSampleContext->pSampleRenderQuadVertexBuffer = nullptr;
     }
 
@@ -442,14 +480,6 @@ void createSampleRenderQuad(sample_context_t* pSampleContext, graphics_frame_t* 
     const float top = 2.0f * (1.0f - y / windowHeight) - 1.0f;
     const float bottom = 2.0f * (1.0f - (y + height) / windowHeight) - 1.0f;
 
-#if 0
-    const float one = 0.5f;
-
-    const float left = -one;
-    const float right = one;
-    const float top = one;
-    const float bottom = -one;
-#endif
     const float quadVertices[] = {
         right, top,
         1.0f, 0.0f,
@@ -487,20 +517,11 @@ void doSampleGuiFrame(sample_context_t* pSampleContext)
             {vertex_attribute_t::texcoord, vertex_attribute_type_t::float32, vertex_attribute_frequency_t::vertex, 0u, 2u}
         };
         pSampleContext->pSampleRenderQuadVertexFormat = createVertexFormat(pGraphicsFrame, vertexAttributes, 2u);
-        
-        shader_compilation_parameters_t vertexShaderParameters = {};
-        vertexShaderParameters.pEntryPoint = "main";
-        vertexShaderParameters.pFilePath = "sample_vertex_shader.hlsl";
-        vertexShaderParameters.pShaderProfile = "vs_6_0";
-
-        shader_compilation_parameters_t fragmentShaderParameters = vertexShaderParameters;
-        fragmentShaderParameters.pFilePath = "sample_pixel_shader.hlsl";
-        fragmentShaderParameters.pShaderProfile = "ps_6_0";
 
         graphics_pipeline_parameters_t pipelineParameter = {};
         pipelineParameter.pName = "SampleQuad";
-        pipelineParameter.pVertexShader = loadAndCompileShaderCodeFromFile(pGraphicsFrame, &vertexShaderParameters, shader_type_flag_t::vertex_shader);
-        pipelineParameter.pPixelShader = loadAndCompileShaderCodeFromFile(pGraphicsFrame, &fragmentShaderParameters, shader_type_flag_t::pixel_shader);
+        pipelineParameter.pVertexShader = compileShaderCode(pGraphicsFrame, imguiVertexShader, getStringLength(imguiVertexShader), "main", nullptr, "ImGui VertexShader", shader_type_t::vertex_shader);
+        pipelineParameter.pPixelShader = compileShaderCode(pGraphicsFrame, imguiPixelShader, getStringLength(imguiPixelShader), "main", nullptr, "ImGui PixelShader", shader_type_t::pixel_shader);
         pipelineParameter.topology = topology_t::triangle_list;
         pipelineParameter.pVertexFormat = pSampleContext->pSampleRenderQuadVertexFormat;
 
@@ -513,6 +534,9 @@ void doSampleGuiFrame(sample_context_t* pSampleContext)
         pSampleContext->pSampler = createTextureSampler(pGraphicsFrame, &samplerParameters);
         pSampleContext->pSampleRenderGraphicsPipeline = createGraphicsPipeline(pGraphicsFrame, &pipelineParameter);
         pSampleContext->initialized = true;
+
+        releaseShaderBinary(pGraphicsFrame, pipelineParameter.pVertexShader);
+        releaseShaderBinary(pGraphicsFrame, pipelineParameter.pPixelShader);
     }
 
     if(pSampleContext->newWindowHeight != pSampleContext->windowHeight || pSampleContext->newWindowWidth != pSampleContext->windowWidth || pSampleContext->frameIndex == 1u)

@@ -1,4 +1,37 @@
 
+const char renderTriangleVertexShader[] = R"(
+struct VertexInput
+{
+    float4 pos : POSITION;
+    float3 color : COLOR;
+};
+
+struct VertexOutput
+{
+    float4 pos : SV_POSITION;
+    float4 color : COLOR;
+};
+
+VertexOutput main(VertexInput vertexInput)
+{
+    VertexOutput output;
+    output.pos = vertexInput.pos;
+    output.color = float4(vertexInput.color, 1.0f);
+    return output;
+})";
+
+const char renderTrianglePixelShader[] = R"(
+struct PixelInput
+{
+    float4 pos : SV_POSITION;
+    float4 color : COLOR;
+};
+
+float4 main(PixelInput input) : SV_Target
+{
+    return input.color;
+})";
+
 struct render_triangle_test_data_t
 {
     mesh_t* pMesh;
@@ -19,15 +52,6 @@ void doRenderTriangleSample(sample_frame_parameter_t* pFrameParameter)
 
 bool initRenderTriangleSample(sample_frame_parameter_t* pFrameParameter)
 {
-    shader_compilation_parameters_t vs_para = {};
-    vs_para.pEntryPoint = "main";
-    vs_para.pFilePath = "render_triangle/vertex_shader.hlsl";
-    vs_para.pShaderProfile = "vs_6_0";
-
-    shader_compilation_parameters_t ps_para = vs_para;
-    ps_para.pFilePath = "render_triangle/pixel_shader.hlsl";
-    ps_para.pShaderProfile = "ps_6_0";
-
     render_triangle_test_data_t* pTestData = (render_triangle_test_data_t*)allocateFromAllocator(pFrameParameter->pAllocator, (sizeof(render_triangle_test_data_t), alloc_flags_t::clear_memory));
     if(pTestData == nullptr)
     {
@@ -41,7 +65,7 @@ bool initRenderTriangleSample(sample_frame_parameter_t* pFrameParameter)
         return false;
     }
 
-    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Render Triangle Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
+    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Render Triangle Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, renderTriangleVertexShader, renderTrianglePixelShader);
     if(pMaterial == nullptr)
     {
         free(pTestData);
@@ -58,7 +82,7 @@ bool initRenderTriangleSample(sample_frame_parameter_t* pFrameParameter)
 void shutdownRenderTriangleSample(sample_frame_parameter_t* pFrameParameter)
 {
     render_triangle_test_data_t* pTestData = (render_triangle_test_data_t*)pFrameParameter->pUserData;
-    //destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
+    destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);
     freeFromAllocator(pFrameParameter->pAllocator, pTestData);
 }

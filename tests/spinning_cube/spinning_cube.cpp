@@ -1,4 +1,57 @@
 
+const char spinningCubePixelShader[] = R"(
+SamplerState mySampler : register(s0, space1);
+Texture2D texture : register(t0, space2);
+
+struct PixelInput
+{
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
+};
+
+float4 main(PixelInput input) : SV_Target
+{
+    return texture.Sample(mySampler, input.uv);
+}   
+)";
+
+const char spinningCubeVertexShader[] = R"(
+cbuffer SpinningCubeData : register(b0, space0)
+{
+    float4x4 viewMatrix;
+    float4x4 projMatrix;
+    float4x4 viewProjMatrix2;
+    float4x4 modelMatrix;
+};
+
+struct VertexInput
+{
+    float3 pos : POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
+};
+
+struct VertexOutput
+{
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
+};
+
+VertexOutput main(VertexInput vertexInput)
+{
+    float4x4 viewProjMatrix = mul(viewMatrix, projMatrix);
+    float4x4 modelViewProjMatrix = mul(modelMatrix, viewProjMatrix);
+
+    VertexOutput output;
+    output.pos = mul(float4(vertexInput.pos, 1.0f), modelViewProjMatrix);
+    output.uv = vertexInput.uv;
+    output.normal = vertexInput.normal;
+    return output;
+}
+)";
+
 struct spinning_cube_constant_buffer_data_t
 {
     matrix4x4f_t viewMatrix;
@@ -32,7 +85,7 @@ void doSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 
     gpu_buffer_t* pUploadBuffer = createGpuBuffer(pFrameParameter->pGraphicsFrame, sizeof(spinning_cube_constant_buffer_data_t), &pTestData->spinningCubeData, gpu_buffer_usage_flag_t::constant_buffer, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, "Spinning Cube Const Data");
     copyGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffer, pUploadBuffer);
-    freeGpuBuffer(pFrameParameter->pGraphicsFrame, pUploadBuffer);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pUploadBuffer);
 
     render_pass_t* pRenderPass = startRenderPass(pFrameParameter->pGraphicsFrame, "Draw Cube", pFrameParameter->pRenderTarget);
     clearColorRenderTarget(pRenderPass, pFrameParameter->pRenderTarget, 1.0f, 1.0f, 1.0f, 1.0f);
@@ -48,15 +101,6 @@ void doSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 
 bool initSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 {
-    shader_compilation_parameters_t vs_para = {};
-    vs_para.pEntryPoint = "main";
-    vs_para.pFilePath = "spinning_cube/vertex_shader.hlsl";
-    vs_para.pShaderProfile = "vs_6_0";
-
-    shader_compilation_parameters_t ps_para = vs_para;
-    ps_para.pFilePath = "spinning_cube/pixel_shader.hlsl";
-    ps_para.pShaderProfile = "ps_6_0";
-
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)allocateFromAllocator(pFrameParameter->pAllocator, sizeof(spinning_cube_test_data_t), alloc_flags_t::clear_memory);
     if(pTestData == nullptr)
     {
@@ -70,7 +114,7 @@ bool initSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
         return false;
     }
 
-    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Spinning Cube Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
+    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Spinning Cube Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, spinningCubeVertexShader, spinningCubePixelShader);
     if(pMaterial == nullptr)
     {
         freeFromAllocator(pFrameParameter->pAllocator, pTestData);
@@ -79,7 +123,7 @@ bool initSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
     }
 
     int textureWidth = 0, textureHeight = 0, channelsInTexture = 0;
-    const stbi_uc* pImageData = stbi_load("spinning_cube/smiley.png", &textureWidth, &textureHeight, &channelsInTexture, 4);
+    const stbi_uc* pImageData = stbi_load("smiley.png", &textureWidth, &textureHeight, &channelsInTexture, 4);
 
     setIdentityMatrix(&pTestData->spinningCubeData.modelMatrix);
 
@@ -116,10 +160,10 @@ bool initSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 void shutdownSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
 {
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)pFrameParameter->pUserData;
-    freeGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffer);
-    freeGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffer);
+    releaseGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
 
-    //destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
+    destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyIndexedMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);
     freeFromAllocator(pFrameParameter->pAllocator, pTestData);
 }

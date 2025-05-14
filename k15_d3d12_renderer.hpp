@@ -127,7 +127,8 @@ enum result_status_t : uint32_t
     file_not_found,
     invalid_arguments,
     internal_error,
-    compilation_error
+    compilation_error,
+    reflection_error
 };
 
 template<typename T, typename BASE_TYPE>
@@ -310,11 +311,16 @@ enum class gpu_resource_state_flag_t : uint32_t
     video_encode_write      = 0x400000
 };
 
-enum class shader_type_flag_t : uint8_t
+enum class shader_type_t : uint8_t
 {
     vertex_shader   = 0x01,
     pixel_shader    = 0x02,
     compute_shader  = 0x04
+};
+
+enum class shader_model_t : uint8_t
+{
+    model_6_0
 };
 
 enum class gpu_resource_flag_t : uint8_t
@@ -328,8 +334,8 @@ struct gpu_resource_t
     ID3D12Resource*                         pResource;
     flags32_t<gpu_resource_state_flag_t>    currentStateMask;
     flags32_t<gpu_resource_state_flag_t>    futureStateMask;
-    flags8_t<shader_type_flag_t>            currentShaderAccessMask;
-    flags8_t<shader_type_flag_t>            futureShaderAccessMask;
+    flags8_t<shader_type_t>                 currentShaderAccessMask;
+    flags8_t<shader_type_t>                 futureShaderAccessMask;
     flags8_t<gpu_resource_flag_t>           flags;
 };
 
@@ -636,30 +642,36 @@ enum class resource_binding_type_t : uint8_t
 
 struct shader_binding_point_t
 {
-    char                            name[maxShaderBindingPointNameLength];
-    uint16_t                        slot;
-    uint16_t                        space;
-    resource_binding_type_t           type;
-    flags8_t<shader_type_flag_t>    shaderAccessMask;      
+    char                       name[maxShaderBindingPointNameLength];
+    uint16_t                   slot;
+    uint16_t                   space;
+    resource_binding_type_t    type;
+    flags8_t<shader_type_t>    shaderAccessMask;      
 };
 
 struct graphics_pipeline_t : public linked_list_node_t<graphics_pipeline_t>
 {
-    ID3D12PipelineState*    pPipelineState;
-    ID3D12RootSignature*    pRootSignature;
-    const char*             pName;
-    topology_t              topology;
-    shader_binding_point_t* pShaderBindingPoints;
-    uint32_t                shaderBindingPointCount;
+    ID3D12PipelineState*            pPipelineState;
+    ID3D12RootSignature*            pRootSignature;
+    const char*                     pName;
+    topology_t                      topology;
+    shader_binding_point_t*         pShaderBindingPoints;
+    uint32_t                        shaderBindingPointCount;
+    uint32_t                        nodeIndex;
+    hash32_t                        hash;
+    flags8_t<gpu_resource_flag_t>   resourceFlags;
 };
 
 struct compute_pipeline_t : public linked_list_node_t<compute_pipeline_t>
 {
-    ID3D12PipelineState*    pPipelineState;
-    ID3D12RootSignature*    pRootSignature;
-    const char*             pName;
-    shader_binding_point_t* pShaderBindingPoints;
-    uint32_t                shaderBindingPointCount;
+    ID3D12PipelineState*            pPipelineState;
+    ID3D12RootSignature*            pRootSignature;
+    const char*                     pName;
+    shader_binding_point_t*         pShaderBindingPoints;
+    uint32_t                        shaderBindingPointCount;
+    uint32_t                        nodeIndex;
+    hash32_t                        hash;
+    flags8_t<gpu_resource_flag_t>   resourceFlags;
 };
 
 struct resource_binding_t
@@ -767,17 +779,35 @@ struct vertex_attribute_entry_t
 
 struct vertex_format_t : public linked_list_node_t<vertex_format_t>
 {
-    D3D12_INPUT_ELEMENT_DESC    pInputElementDescs[maxVertexAttributeCount];
-    uint32_t                    inputElementCount;
+    D3D12_INPUT_ELEMENT_DESC        pInputElementDescs[maxVertexAttributeCount];
+    uint32_t                        inputElementCount;
 };
 
 struct shader_binary_t : public linked_list_node_t<shader_binary_t>
 {
-    shader_binding_point_t  bindingPoints[maxShaderBindingPoints];
-    const uint8_t*          pShaderBlob;
-    const char*             pName;
-    uint32_t                shaderBlobSizeInBytes;
-    uint32_t                bindingPointCount;
+    shader_binding_point_t          bindingPoints[maxShaderBindingPoints];
+    const uint8_t*                  pShaderBlob;
+    const char*                     pName;
+    uint32_t                        shaderBlobSizeInBytes;
+    uint32_t                        bindingPointCount;
+    flags8_t<gpu_resource_flag_t>   resourceFlags;
+};
+
+struct shader_compilation_result_t
+{
+    shader_binary_t*    pShaderBinary;
+    const char*         pErrorMessage;
+    const char*         pWarningMessage;
+    result_status_t     result;
+};
+       
+struct shader_compilation_parameters_t
+{
+    const char*     pShaderProfile;
+    const char*     pEntryPoint;
+    const char*     pDefines;
+    const char*     pShaderName;
+    shader_type_t   shaderType;
 };
 
 struct render_pass_parameters_t
@@ -944,6 +974,7 @@ struct graphics_frame_t
     compute_pipeline_t*                     pFirstComputePipelineToFree;
     texture_sampler_t*                      pFirstSamplerToFree;
     render_target_t*                        pFirstRenderTargetToFree;
+    shader_binary_t*                        pFirstShaderBinaryToFree;
     gpu_command_allocator_t*                pFirstCommandAllocatorToReset;
 
     descriptor_heap_t*                      pShaderVisibleDescriptorHeap;
@@ -1139,6 +1170,11 @@ void clearMemoryWithZeroes(T* pMemory)
 void copyMemoryNonOverlapping(void* pDst, const void* pSrc, const uint64_t sizeInBytes)
 {
     memcpy(pDst, pSrc, sizeInBytes);
+}
+
+uint64_t getStringLength(const char* pString)
+{
+    return strlen(pString);
 }
 
 void resetStackAllocator(memory_allocator_t* pAllocator)
@@ -1597,32 +1633,76 @@ HRESULT logOnHResultError(const HRESULT originalResult, const char* pFunctionCal
     return originalResult;
 }
 
-void freeGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pGpuBuffer)
+void releaseComputePipeline(graphics_frame_t* pGraphicsFrame, compute_pipeline_t* pComputePipeline)
 {
+    #if 0
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pComputePipeline != nullptr);
+    ASSERT_DEBUG(pComputePipeline->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
+    compute_pipeline_t* pPrevComputePipeline = pGraphicsFrame->pFirstComputePipelineToFree;
+    pComputePipeline->pNext = pPrevComputePipeline;
+    pGraphicsFrame->pFirstComputePipelineToFree = pComputePipeline;
+    pComputePipeline->resourceFlags.setFlag(gpu_resource_flag_t::marked_as_free);
+    #endif
+}
+
+void releaseGraphicsPipeline(graphics_frame_t* pGraphicsFrame, graphics_pipeline_t* pGraphicsPipeline)
+{
+    #if 0
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pGraphicsPipeline != nullptr);
+    ASSERT_DEBUG(pGraphicsPipeline->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
+    graphics_pipeline_t* pPrevGraphicsPipeline = pGraphicsFrame->pFirstGraphicsPipelineToFree;
+    pGraphicsPipeline->pNext = pPrevGraphicsPipeline;
+    pGraphicsFrame->pFirstGraphicsPipelineToFree = pGraphicsPipeline;
+    pGraphicsPipeline->resourceFlags.setFlag(gpu_resource_flag_t::marked_as_free);
+    #endif
+}
+
+void releaseShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pShaderBinary)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pShaderBinary != nullptr);
+    ASSERT_DEBUG(pShaderBinary->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
+    pShaderBinary->pNext = pGraphicsFrame->pFirstShaderBinaryToFree;
+    pGraphicsFrame->pFirstShaderBinaryToFree = pShaderBinary;
+    pShaderBinary->resourceFlags.setFlag(gpu_resource_flag_t::marked_as_free);
+}
+
+void releaseGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pGpuBuffer)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pGpuBuffer != nullptr);
     ASSERT_DEBUG(pGpuBuffer->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
     pGpuBuffer->pNext = pGraphicsFrame->pFirstGpuBufferToFree;
     pGraphicsFrame->pFirstGpuBufferToFree = pGpuBuffer;
     pGpuBuffer->resourceFlags.setFlag(gpu_resource_flag_t::marked_as_free);
 }
 
-void freeGpuTexture(graphics_frame_t* pGraphicsFrame, gpu_texture_t* pGpuTexture)
+void releaseGpuTexture(graphics_frame_t* pGraphicsFrame, gpu_texture_t* pGpuTexture)
 {
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pGpuTexture != nullptr);
     ASSERT_DEBUG(pGpuTexture->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
     pGpuTexture->pNext = pGraphicsFrame->pFirstGpuTextureToFree;
     pGraphicsFrame->pFirstGpuTextureToFree = pGpuTexture;
     pGpuTexture->resourceFlags.setFlag(gpu_resource_flag_t::marked_as_free);
 }
 
-void freeGpuTextureView(graphics_frame_t* pGraphicsFrame, gpu_texture_view_t* pGpuTextureView)
+void releaseGpuTextureView(graphics_frame_t* pGraphicsFrame, gpu_texture_view_t* pGpuTextureView)
 {
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pGpuTextureView != nullptr);
     ASSERT_DEBUG(pGpuTextureView->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
     pGpuTextureView->pNext = pGraphicsFrame->pFirstGpuTextureViewToFree;
     pGraphicsFrame->pFirstGpuTextureViewToFree = pGpuTextureView;
     pGpuTextureView->resourceFlags.setFlag(gpu_resource_flag_t::marked_as_free);
 }
 
-void freeRenderTarget(graphics_frame_t* pGraphicsFrame, render_target_t* pRenderTarget)
+void releaseRenderTarget(graphics_frame_t* pGraphicsFrame, render_target_t* pRenderTarget)
 {
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pRenderTarget != nullptr);
     ASSERT_DEBUG(pRenderTarget->resourceFlags.isFlagClear(gpu_resource_flag_t::marked_as_free));
     pRenderTarget->pNext = pGraphicsFrame->pFirstRenderTargetToFree;
     pGraphicsFrame->pFirstRenderTargetToFree = pRenderTarget;
@@ -1655,6 +1735,125 @@ void mergeLinkedLists(linked_list_node_t<T>** ppLinkedListDestination, linked_li
 
         pCurrentNode = pNextNode;
     }
+}
+
+
+hash32_t generateHash(const void* pData, const uint64_t dataSizeInBytes)
+{
+    const char* pDataBuffer = (const char*)pData;
+    hash32_t hash = 5381;
+    for(uint64_t i = 0; i < dataSizeInBytes; ++i)
+    {
+        int c = *pDataBuffer++;
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
+template<typename T>
+hash_map_node_t<T>* getFreeHashMapNode(hash_map_t<T>* pHashMap)
+{
+    if(pHashMap->count + 1 == pHashMap->capacity)
+    {
+        return nullptr;
+    }
+
+    return pHashMap->pFreeNodes + pHashMap->count;
+}
+
+template<typename T>
+uint32_t calculateHashmapEntryIndex(const void* pNode, const hash_map_t<T>* pHashMap)
+{
+    const ptrdiff_t nodeDistanceFromBase = (ptrdiff_t)pNode - (ptrdiff_t)pHashMap->ppBaseNodes[0];
+    const ptrdiff_t nodeIndex = (nodeDistanceFromBase >> 3);
+    return rangeCheckCast<uint32_t>(nodeIndex);
+}
+
+template<typename T>
+hash_map_entry_t<T*> findOrInsertEntryIntoHashMap(hash_map_t<T>* pHashMap, const void* pData, const uint64_t dataSizeInBytes)
+{
+    const hash32_t hash = generateHash(pData, dataSizeInBytes);
+    const uint32_t index = hash % pHashMap->capacity;
+    bool foundNode = false;
+    hash_map_node_t<T>** ppNode = &pHashMap->ppBaseNodes[index];
+    hash_map_node_t<T>* pNode = *ppNode;
+    hash_map_node_t<T>* pPrevNode = pHashMap->ppBaseNodes[index];
+
+    while(true)
+    {
+        if(pNode == nullptr)
+        {
+            break;
+        }
+
+        foundNode = (pNode->hash == hash);
+        if(foundNode)
+        {
+            break;
+        }
+        
+        pPrevNode = pNode;
+        ppNode = (hash_map_node_t<T>**)&pNode->pNext;
+        pNode = *ppNode;
+    }
+
+    if(foundNode)
+    {
+        hash_map_entry_t<T*> entry;
+        entry.isNew     = false;
+        entry.value     = &(*ppNode)->value;
+        entry.nodeIndex = calculateHashmapEntryIndex(pNode, pHashMap);
+        entry.hash      = hash;
+        return entry;
+    }
+    
+    hash_map_node_t<T>* pNewNode = getFreeHashMapNode(pHashMap);
+    if(pNewNode == nullptr)
+    {
+        //FK: Note: hashmap doesn't grow yet.
+        ASSERT_DEBUG_UNREACHABLE_CODE();
+    }
+
+    ++pHashMap->count;
+    pNewNode->hash = hash;
+    *ppNode = pNewNode;
+
+    hash_map_entry_t<T*> entry;
+    entry.isNew     = true;
+    entry.value     = &(*ppNode)->value;
+    entry.nodeIndex = calculateHashmapEntryIndex(pNode, pHashMap);
+    entry.hash      = hash;
+    return entry;
+}
+
+template<typename T>
+void removeEntryFromHashMap(hash_map_t<T>* pHashMap, const hash_map_entry_t<T*>* pEntry)
+{
+    const uint32_t nodeIndex = pEntry->nodeIndex;
+    ASSERT_ALWAYS(pHashMap->ppBaseNodes[nodeIndex] != nullptr);
+    ASSERT_ALWAYS(pHashMap->count > 0u);
+
+    hash_map_node_t<T>* pPrevNode = nullptr;
+    hash_map_node_t<T>* pNode = pHashMap->ppBaseNodes[nodeIndex];
+    while(pNode->hash != pEntry->hash)
+    {
+        pPrevNode = pNode;
+        pNode = (hash_map_node_t<T>*)pNode->pNext;
+    }
+
+    hash_map_node_t<T>* pNextNode = (hash_map_node_t<T>*)pNode->pNext;
+    if(pPrevNode == nullptr)
+    {
+        pHashMap->ppBaseNodes[nodeIndex] = pNextNode;
+    }
+    else
+    {
+        pPrevNode->pNext = pNextNode;
+    }
+
+    const uint32_t freeNodesIndex = pHashMap->capacity - pHashMap->count;
+    pHashMap->pFreeNodes[freeNodesIndex] = *pNode;
+    pHashMap->count -= 1u;
 }
 
 void destroyDescriptorHeap(descriptor_heap_t* pDescriptorHeap)
@@ -1745,8 +1944,6 @@ void freeDescriptor(const descriptor_handle_t* pDescriptorHandle, descriptor_hea
 void freeGpuBufferInternally(gpu_buffer_t* pGpuBuffer)
 {
     ASSERT_DEBUG(pGpuBuffer->resourceFlags.isFlagSet(gpu_resource_flag_t::marked_as_free));
-
-    gpu_buffer_t* pNextGpuBuffer = (gpu_buffer_t*)pGpuBuffer->pNext;
     COM_RELEASE(pGpuBuffer->resource.pResource);
     pGpuBuffer->resourceFlags.clearFlag(gpu_resource_flag_t::marked_as_free);
 }
@@ -1760,7 +1957,7 @@ void freeGpuTextureInternally(gpu_texture_t* pGpuTexture, graphics_frame_t* pGra
 
     if(pGpuTexture->pView != nullptr)
     {
-        freeGpuTextureView(pGraphicsFrame, pGpuTexture->pView);
+        releaseGpuTextureView(pGraphicsFrame, pGpuTexture->pView);
     }
 }
 
@@ -1788,12 +1985,34 @@ void freeGpuTextureViewInternally(gpu_texture_view_t* pGpuTextureView, graphics_
 
 void freeGraphicsPipelineInternally(graphics_pipeline_t* pGraphicsPipeline, graphics_frame_t* pGraphicsFrame)
 {
+    //TODO: Fix pipeline free - don't hash?
+    #if 0
     COM_RELEASE(pGraphicsPipeline->pPipelineState);
     COM_RELEASE(pGraphicsPipeline->pRootSignature);
     ZeroMemory(pGraphicsPipeline, sizeof(graphics_pipeline_t));
 
-    //TODO
-    //FK: Remove graphics pipeline entry from hash map
+    hash_map_entry_t<graphics_pipeline_t*> pipelineHashEntry = {};
+    pipelineHashEntry.hash = pGraphicsPipeline->hash;
+    pipelineHashEntry.nodeIndex = pGraphicsPipeline->nodeIndex;
+
+    removeEntryFromHashMap(&pGraphicsFrame->pRenderResourceCache->graphicPipelines, &pipelineHashEntry);
+    #endif
+}
+
+void freeComputePipelineInternally(compute_pipeline_t* pComputePipelineStateToFree, graphics_frame_t* pGraphicsFrame)
+{
+    //TODO: Fix pipeline free - don't hash?
+    #if 0
+    COM_RELEASE(pComputePipelineStateToFree->pPipelineState);
+    COM_RELEASE(pComputePipelineStateToFree->pRootSignature);
+    ZeroMemory(pComputePipelineStateToFree, sizeof(compute_pipeline_t));
+
+    hash_map_entry_t<compute_pipeline_t*> pipelineHashEntry = {};
+    pipelineHashEntry.hash = pComputePipelineStateToFree->hash;
+    pipelineHashEntry.nodeIndex = pComputePipelineStateToFree->nodeIndex;
+
+    removeEntryFromHashMap(&pGraphicsFrame->pRenderResourceCache->computePipelines, &pipelineHashEntry);
+    #endif
 }
 
 void freeRenderTargetInternally(render_target_t* pRenderTarget, graphics_frame_t* pGraphicsFrame)
@@ -1811,6 +2030,21 @@ void freeRenderTargetInternally(render_target_t* pRenderTarget, graphics_frame_t
     }
 
     pRenderTarget->resourceFlags.clearFlag(gpu_resource_flag_t::marked_as_free);
+}
+
+void freeShaderBinaryInternally(shader_binary_t* pShaderBinary, graphics_frame_t* pGraphicsFrame)
+{
+    ASSERT_DEBUG(pShaderBinary->resourceFlags.isFlagSet(gpu_resource_flag_t::marked_as_free));
+
+    if(pShaderBinary->pShaderBlob)
+    {
+        freeFromAllocator(pGraphicsFrame->pMemoryAllocator, (void*)pShaderBinary->pShaderBlob);
+        pShaderBinary->pShaderBlob = nullptr;
+        pShaderBinary->shaderBlobSizeInBytes = 0u;
+    }
+
+    pShaderBinary->resourceFlags.clearFlag(gpu_resource_flag_t::marked_as_free);
+
 }
 
 void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
@@ -1870,6 +2104,19 @@ void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
         pGraphicsFrame->pFirstGraphicsPipelineToFree = nullptr;
     }
 
+    if(pGraphicsFrame->pFirstComputePipelineToFree != nullptr)
+    {
+        compute_pipeline_t* pComputePipelineStateToFree = pGraphicsFrame->pFirstComputePipelineToFree;
+        while(pComputePipelineStateToFree != nullptr)
+        {
+            compute_pipeline_t* pNextComputePipelineStateToFree = (compute_pipeline_t*)pComputePipelineStateToFree->pNext;
+            freeComputePipelineInternally(pComputePipelineStateToFree, pGraphicsFrame);
+            pComputePipelineStateToFree = pNextComputePipelineStateToFree;
+        }
+
+        pGraphicsFrame->pFirstComputePipelineToFree = nullptr;
+    }
+
     if(pGraphicsFrame->pFirstRenderTargetToFree != nullptr)
     {
         render_target_t* pRenderTargetToFree = pGraphicsFrame->pFirstRenderTargetToFree;
@@ -1882,6 +2129,20 @@ void freePendingFrameResources(graphics_frame_t* pGraphicsFrame)
 
         mergeLinkedLists(&pGraphicsFrame->pRenderResourceCache->pFirstFreeRenderTarget, pGraphicsFrame->pFirstRenderTargetToFree);
         pGraphicsFrame->pFirstRenderTargetToFree = nullptr;
+    }
+
+    if(pGraphicsFrame->pFirstShaderBinaryToFree != nullptr)
+    {
+        shader_binary_t* pShaderBinaryToFree = pGraphicsFrame->pFirstShaderBinaryToFree;
+        while(pShaderBinaryToFree != nullptr)
+        {
+            shader_binary_t* pNextShaderBinaryToFree = pShaderBinaryToFree->pNext;
+            freeShaderBinaryInternally(pShaderBinaryToFree, pGraphicsFrame);
+            pShaderBinaryToFree = pNextShaderBinaryToFree;
+        }
+
+        mergeLinkedLists(&pGraphicsFrame->pRenderResourceCache->pFirstFreeShaderBinary, pGraphicsFrame->pFirstShaderBinaryToFree);
+        pGraphicsFrame->pFirstShaderBinaryToFree = nullptr;
     }
 }
 
@@ -2196,124 +2457,6 @@ bool createFence(D3D12DeviceType* pDevice, ID3D12Fence** pOutFence, const uint32
     }
 
     return true;
-}
-
-hash32_t generateHash(const void* pData, const uint64_t dataSizeInBytes)
-{
-    const char* pDataBuffer = (const char*)pData;
-    hash32_t hash = 5381;
-    for(uint64_t i = 0; i < dataSizeInBytes; ++i)
-    {
-        int c = *pDataBuffer++;
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash;
-}
-
-template<typename T>
-hash_map_node_t<T>* getFreeHashMapNode(hash_map_t<T>* pHashMap)
-{
-    if(pHashMap->count + 1 == pHashMap->capacity)
-    {
-        return nullptr;
-    }
-
-    return pHashMap->pFreeNodes + pHashMap->count;
-}
-
-template<typename T>
-uint32_t calculateHashmapEntryIndex(const void* pNode, const hash_map_t<T>* pHashMap)
-{
-    const ptrdiff_t nodeDistanceFromBase = (ptrdiff_t)pNode - (ptrdiff_t)pHashMap->ppBaseNodes[0];
-    const ptrdiff_t nodeIndex = (nodeDistanceFromBase >> 3);
-    return rangeCheckCast<uint32_t>(nodeIndex);
-}
-
-template<typename T>
-hash_map_entry_t<T*> findOrInsertEntryIntoHashMap(hash_map_t<T>* pHashMap, const void* pData, const uint64_t dataSizeInBytes)
-{
-    const hash32_t hash = generateHash(pData, dataSizeInBytes);
-    const uint32_t index = hash % pHashMap->capacity;
-    bool foundNode = false;
-    hash_map_node_t<T>** ppNode = &pHashMap->ppBaseNodes[index];
-    hash_map_node_t<T>* pNode = *ppNode;
-    hash_map_node_t<T>* pPrevNode = pHashMap->ppBaseNodes[index];
-
-    while(true)
-    {
-        if(pNode == nullptr)
-        {
-            break;
-        }
-
-        foundNode = (pNode->hash == hash);
-        if(foundNode)
-        {
-            break;
-        }
-        
-        pPrevNode = pNode;
-        ppNode = (hash_map_node_t<T>**)&pNode->pNext;
-        pNode = *ppNode;
-    }
-
-    if(foundNode)
-    {
-        hash_map_entry_t<T*> entry;
-        entry.isNew     = false;
-        entry.value     = &(*ppNode)->value;
-        entry.nodeIndex = calculateHashmapEntryIndex(pNode, pHashMap);
-        entry.hash      = hash;
-        return entry;
-    }
-    
-    hash_map_node_t<T>* pNewNode = getFreeHashMapNode(pHashMap);
-    if(pNewNode == nullptr)
-    {
-        //FK: Note: hashmap doesn't grow yet.
-        ASSERT_DEBUG_UNREACHABLE_CODE();
-    }
-
-    ++pHashMap->count;
-    pNewNode->hash = hash;
-    *ppNode = pNewNode;
-
-    hash_map_entry_t<T*> entry;
-    entry.isNew     = true;
-    entry.value     = &(*ppNode)->value;
-    entry.nodeIndex = calculateHashmapEntryIndex(pNode, pHashMap);
-    entry.hash      = hash;
-    return entry;
-}
-
-template<typename T>
-void removeEntryFromHashMap(hash_map_t<T>* pHashMap, const hash_map_entry_t<T*>* pEntry)
-{
-    const uint32_t nodeIndex = pEntry->nodeIndex;
-    ASSERT_ALWAYS(pHashMap->ppBaseNodes[nodeIndex] != nullptr);
-    ASSERT_ALWAYS(pHashMap->count > 0u);
-
-    hash_map_node_t<T>* pPrevNode = nullptr;
-    hash_map_node_t<T>* pNode = pHashMap->ppBaseNodes[nodeIndex];
-    while(pNode->hash != pEntry->hash)
-    {
-        pPrevNode = pNode;
-        pNode = (hash_map_node_t<T>*)pNode->pNext;
-    }
-
-    hash_map_node_t<T>* pNextNode = (hash_map_node_t<T>*)pNode->pNext;
-    if(pPrevNode == nullptr)
-    {
-        pHashMap->ppBaseNodes[nodeIndex] = pNextNode;
-    }
-    else
-    {
-        pPrevNode->pNext = pNextNode;
-    }
-
-    const uint32_t freeNodesIndex = pHashMap->capacity - pHashMap->count;
-    pHashMap->pFreeNodes[freeNodesIndex] = *pNode;
-    pHashMap->count -= 1u;
 }
 
 const char* getVertexAttributeSemanticBaseName(const vertex_attribute_t attribute)
@@ -2762,6 +2905,8 @@ NO_DISCARD graphics_pipeline_t* createGraphicsPipeline(graphics_frame_t* pGraphi
     pPipelineState->topology                = pPipelineParameters->topology;
     pPipelineState->pShaderBindingPoints    = pShaderBindingPoints;
     pPipelineState->shaderBindingPointCount = bindingPointCount;
+    pPipelineState->nodeIndex               = pipelineState.nodeIndex;
+    pPipelineState->hash                    = pipelineState.hash;
     pPipelineStateObject.takeOwnership();
     return pPipelineState;
 }
@@ -3318,14 +3463,14 @@ D3D12_RESOURCE_STATES mapResourceStateMaskToD3D12ResourceStateMask(const flags32
     return resourceStates;
 }
 
-D3D12_RESOURCE_STATES mapShaderTypeMaskToD3D12ResourceStateMask(const flags8_t<shader_type_flag_t>& shaderTypeMask)
+D3D12_RESOURCE_STATES mapShaderTypeMaskToD3D12ResourceStateMask(const flags8_t<shader_type_t>& shaderTypeMask)
 {
     D3D12_RESOURCE_STATES shaderMask = D3D12_RESOURCE_STATE_COMMON;
-    if(shaderTypeMask.isFlagSet(shader_type_flag_t::pixel_shader))
+    if(shaderTypeMask.isFlagSet(shader_type_t::pixel_shader))
     {
         shaderMask |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
-    if(shaderTypeMask.isFlagSet(shader_type_flag_t::compute_shader) || shaderTypeMask.isFlagSet(shader_type_flag_t::vertex_shader))
+    if(shaderTypeMask.isFlagSet(shader_type_t::compute_shader) || shaderTypeMask.isFlagSet(shader_type_t::vertex_shader))
     {
         shaderMask |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
@@ -3908,7 +4053,7 @@ NO_DISCARD render_target_t* createRenderTarget(graphics_frame_t* pGraphicsFrame,
         descriptor_handle_t colorTargetDescriptor = {};
         if(!allocateDescriptor(&colorTargetDescriptor, pGraphicsFrame->pRenderTargetColorViewDescriptorHeap))
         {
-            freeRenderTarget(pGraphicsFrame, pRenderTarget);
+            releaseRenderTarget(pGraphicsFrame, pRenderTarget);
             return nullptr;
         }
 
@@ -3922,7 +4067,7 @@ NO_DISCARD render_target_t* createRenderTarget(graphics_frame_t* pGraphicsFrame,
         descriptor_handle_t depthTargetDescriptor = {};
         if(!allocateDescriptor(&depthTargetDescriptor, pGraphicsFrame->pRenderTargetDepthViewDescriptorHeap))
         {
-            freeRenderTarget(pGraphicsFrame, pRenderTarget);
+            releaseRenderTarget(pGraphicsFrame, pRenderTarget);
             return nullptr;
         }
         pGraphicsFrame->pDevice->CreateRenderTargetView(pDepthTexture->resource.pResource, nullptr, depthTargetDescriptor.cpuDescriptorHandle);
@@ -5127,7 +5272,7 @@ NO_DISCARD gpu_buffer_t* createGpuBuffer(graphics_frame_t* pGraphicsFrame, uint3
             }
             
             copyGpuBuffer(pGraphicsFrame, pGpuBuffer, pStagingBuffer);
-            freeGpuBuffer(pGraphicsFrame, pStagingBuffer);
+            releaseGpuBuffer(pGraphicsFrame, pStagingBuffer);
         }   
     }
 
@@ -5277,7 +5422,7 @@ NO_DISCARD gpu_texture_t* createGpuTexture(graphics_frame_t* pGraphicsFrame, uin
     pGpuTexture->pView = createGpuTextureViewForTexture(pGraphicsFrame, mipMapLevels, pGpuTexture, textureUsageFlags, format, formatType);
     if(pGpuTexture->pView == nullptr)
     {
-        freeGpuTexture(pGraphicsFrame, pGpuTexture);
+        releaseGpuTexture(pGraphicsFrame, pGpuTexture);
         return nullptr;
     }
     
@@ -5290,7 +5435,7 @@ NO_DISCARD gpu_texture_t* createGpuTexture(graphics_frame_t* pGraphicsFrame, uin
         }
         
         copyGpuTextureFromBuffer(pGraphicsFrame, pGpuTexture, pStagingBuffer);
-        freeGpuBuffer(pGraphicsFrame, pStagingBuffer);
+        releaseGpuBuffer(pGraphicsFrame, pStagingBuffer);
     }
 
     setD3D12ObjectDebugName(pGpuTexture->resource.pResource, pGpuTexture->pName);
@@ -5377,36 +5522,6 @@ void unmapGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pGpuBuffer)
     pGpuBuffer->flags.clearFlag(gpu_buffer_flag_t::is_mapped);
 }
 
-void releaseGpuBuffer(graphics_frame_t* pGraphicsFrame, gpu_buffer_t* pGpuBuffer)
-{
-    ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(pGpuBuffer != nullptr);
-
-    gpu_buffer_t* pPrevGpuBuffer = pGraphicsFrame->pFirstGpuBufferToFree;
-    pGpuBuffer->pNext = pPrevGpuBuffer;
-    pGraphicsFrame->pFirstGpuBufferToFree = pGpuBuffer;
-}
-
-void releaseVertexFormat(graphics_frame_t* pGraphicsFrame, vertex_format_t* pVertexFormat)
-{
-    ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(pVertexFormat != nullptr);
-
-    vertex_format_t* pPrevVertexFormat = pGraphicsFrame->pFirstVertexFormatToFree;
-    pVertexFormat->pNext = pPrevVertexFormat;
-    pGraphicsFrame->pFirstVertexFormatToFree = pVertexFormat;
-}
-
-void releaseGraphicsPipeline(graphics_frame_t* pGraphicsFrame, graphics_pipeline_t* pGraphicsPipeline)
-{
-    ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(pGraphicsPipeline != nullptr);
-
-    graphics_pipeline_t* pPrevGraphicsPipeline = pGraphicsFrame->pFirstGraphicsPipelineToFree;
-    pGraphicsPipeline->pNext = pPrevGraphicsPipeline;
-    pGraphicsFrame->pFirstGraphicsPipelineToFree = pGraphicsPipeline;
-}
-
 void initializeVertexFormat(graphics_frame_t* pGraphicsFrame, vertex_format_t* pVertexFormat, const vertex_attribute_entry_t* pVertexAttributes, const uint32_t vertexAttributeCount)
 {
     //FK: TODO:
@@ -5442,15 +5557,6 @@ NO_DISCARD vertex_format_t* createVertexFormat(graphics_frame_t* pGraphicsFrame,
     initializeVertexFormat(pGraphicsFrame, vertexFormatEntry.value, pVertexAttributes, vertexAttributeCount);
     return vertexFormatEntry.value;
 }
-
-struct shader_compilation_parameters_t
-{
-    const char*     pShaderProfile;
-    const char*     pFilePath;
-    const char*     pShaderSourceCode;
-    const char*     pEntryPoint;
-    const char*     pDefines;
-};
 
 result_t<memory_buffer_t> readWholeFileIntoNewBuffer(memory_allocator_t* pAllocator, const char* pFilePath)
 {
@@ -5570,6 +5676,21 @@ void freeCompilerArguments(memory_allocator_t* pMemoryAllocator, dxc_arguments_t
     freeFromAllocator(pMemoryAllocator, pArguments->ppArguments);
 }
 
+void freeCompilationResult(memory_allocator_t* pMemoryAllocator, shader_compilation_result_t* pShaderCompilationResult)
+{
+    if(pShaderCompilationResult->pWarningMessage != nullptr)
+    {
+        freeFromAllocator(pMemoryAllocator, (void*)pShaderCompilationResult->pWarningMessage);
+        pShaderCompilationResult->pWarningMessage = nullptr;
+    }
+
+    if(pShaderCompilationResult->pErrorMessage != nullptr)
+    {
+        freeFromAllocator(pMemoryAllocator, (void*)pShaderCompilationResult->pErrorMessage);
+        pShaderCompilationResult->pErrorMessage = nullptr;
+    }
+}
+
 result_t<dxc_arguments_t> generateCompilerArgumentsIntoNewBuffer(memory_allocator_t* pMemoryAllocator, const shader_compilation_parameters_t* pParameters)
 {
     uint32_t argumentCount = 6u; //entry point + shader profile
@@ -5640,53 +5761,100 @@ cleanup_and_return_out_of_memory:
     return result_status_t::out_of_memory;
 }
 
-void destroyShaderBinary(graphics_frame_t* pGraphicsFrame, shader_binary_t* pShaderBinary)
+const char* createShaderProfileName(memory_allocator_t* pMemoryAllocator, const shader_type_t shaderType, const shader_model_t shaderModel)
 {
-    ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(pShaderBinary != nullptr);
-
-    freeFromAllocator(pGraphicsFrame->pMemoryAllocator, (void*)pShaderBinary->pShaderBlob);
-    addNodesToLinkedList(&pGraphicsFrame->pRenderResourceCache->pFirstFreeShaderBinary, pShaderBinary, 1u);
-}
-
-NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const shader_compilation_parameters_t* pParameters, shader_type_flag_t shaderTypeFlag)
-{
-    ASSERT_DEBUG(pGraphicsFrame != nullptr);
-    ASSERT_DEBUG(pParameters != nullptr);
-    ASSERT_DEBUG(pParameters->pEntryPoint != nullptr)
-    ASSERT_DEBUG(pParameters->pFilePath != nullptr);
-    ASSERT_DEBUG(pParameters->pShaderProfile != nullptr);
-
-    result_t<memory_buffer_t> shaderCodeResult = readWholeFileIntoNewBuffer(pGraphicsFrame->pFrameAllocator, pParameters->pFilePath);
-    if(!isResultSuccessful(shaderCodeResult))
+    char* pShaderProfileName = (char*)allocateFromAllocator(pMemoryAllocator, 7u, alloc_flags_t::clear_memory);
+    if(pShaderProfileName == nullptr)
     {
-        logError("Could not read shader file '%s' - error: %s.", pParameters->pFilePath, getResultString(shaderCodeResult));
         return nullptr;
     }
 
-    DxcBuffer shaderSourceBuffer = {};
-    shaderSourceBuffer.Ptr = shaderCodeResult.value.pData;
-    shaderSourceBuffer.Size = shaderCodeResult.value.sizeInBytes;
+    switch(shaderType)
+    {
+        case shader_type_t::vertex_shader:
+            strcat_s(pShaderProfileName, 7u, "vs_");
+            break;
+        case shader_type_t::pixel_shader:
+            strcat_s(pShaderProfileName, 7u, "ps_");
+            break;
+        case shader_type_t::compute_shader:
+            strcat_s(pShaderProfileName, 7u, "cs_");
+            break;
+        default:
+            ASSERT_DEBUG_UNREACHABLE_CODE();
+            break;
+    }
 
-    result_t<dxc_arguments_t> compileArgumentsResult = generateCompilerArgumentsIntoNewBuffer(pGraphicsFrame->pFrameAllocator, pParameters);
+    switch(shaderModel)
+    {
+        case shader_model_t::model_6_0:
+            strcat_s(pShaderProfileName, 7u, "6_0");
+            break;
+        default:
+            ASSERT_DEBUG_UNREACHABLE_CODE();
+            break;
+    }
+
+    return pShaderProfileName;
+}
+
+const char* copyFormattedString(memory_allocator_t* pMemoryAllocator, const char* pFormattedString, ...)
+{
+    char localTempBuffer[1024] = {};
+
+    va_list vaList;
+    va_start(vaList, pFormattedString);
+    const int charsWritten = vsprintf_s(localTempBuffer, sizeof(localTempBuffer), pFormattedString, vaList);
+    va_end(vaList);
+
+    char* pStringCopyBuffer = (char*)allocateFromAllocator(pMemoryAllocator, charsWritten + 1);
+    if(pStringCopyBuffer == nullptr)
+    {
+        return nullptr;
+    }
+
+    copyMemoryNonOverlapping(pStringCopyBuffer, localTempBuffer, charsWritten);
+    pStringCopyBuffer[charsWritten] = 0;
+    return pStringCopyBuffer;
+}
+
+void* allocateBufferCopy(memory_allocator_t* pMemoryAllocator, const void* pBufferData, const uint64_t bufferSizeInBytes)
+{
+    void* pBufferCopy = allocateFromAllocator(pMemoryAllocator, bufferSizeInBytes);
+    if(pBufferCopy == nullptr)
+    {
+        return nullptr;
+    }
+
+    copyMemoryNonOverlapping(pBufferCopy, pBufferData, bufferSizeInBytes);
+    return pBufferCopy;
+}
+
+NO_DISCARD shader_compilation_result_t compileShaderCodeInternally(graphics_frame_t* pGraphicsFrame, const char* pShaderCode, const uint64_t shaderCodeLength, const shader_compilation_parameters_t* pCompilationParameters)
+{
+    DxcBuffer shaderSourceBuffer = {};
+    shaderSourceBuffer.Ptr = pShaderCode;
+    shaderSourceBuffer.Size = shaderCodeLength;
+
+    shader_compilation_result_t compilationResult = {};
+
+    result_t<dxc_arguments_t> compileArgumentsResult = generateCompilerArgumentsIntoNewBuffer(pGraphicsFrame->pFrameAllocator, pCompilationParameters);
     if(!isResultSuccessful(compileArgumentsResult))
     {
-        logError("Could not generate compiler arguments for shader file '%s' - error: %s.", pParameters->pFilePath, getResultString(compileArgumentsResult));
-        return nullptr;
+        compilationResult.result = compileArgumentsResult.status;
+        return compilationResult;
     }
 
     com_auto_release_t<IDxcResult> pCompileResult = nullptr;
 
     shader_compiler_context_t* pShaderCompilerContext = pGraphicsFrame->pShaderCompilerContext;
     const HRESULT compileResult = COM_CALL(pShaderCompilerContext->pShaderCompiler->Compile(&shaderSourceBuffer, compileArgumentsResult.value.ppArguments, compileArgumentsResult.value.argumentCount, pShaderCompilerContext->pIncludeHandler, IID_PPV_ARGS(&pCompileResult)));
-    
     freeCompilerArguments(pGraphicsFrame->pFrameAllocator, &compileArgumentsResult.value);
-    freeFromAllocator(pGraphicsFrame->pFrameAllocator, shaderCodeResult.value.pData);
-    
+
     if(compileResult != S_OK)
     {
-        logError("Shader compiler couldn't compile shader '%s' - error: %s.", pParameters->pFilePath, getHResultString(compileResult));
-        return nullptr;
+        compilationResult.result = result_status_t::compilation_error;
+        return compilationResult;
     }
 
     if(pCompileResult->HasOutput(DXC_OUT_ERRORS))
@@ -5695,14 +5863,15 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
         const HRESULT getErrorBufferResult = COM_CALL(pCompileResult->GetErrorBuffer(&pErrorBufferEncoding));
         if(getErrorBufferResult != S_OK)
         {
-            logError("Shader compilation of shader '%s' failed but the error couldn't get retrieved - error: %s.", pParameters->pFilePath, getHResultString(getErrorBufferResult));
-            return nullptr;
+            compilationResult.result = result_status_t::compilation_error;
+            return compilationResult;
         }
 
         if(pErrorBufferEncoding != nullptr && pErrorBufferEncoding->GetBufferSize() > 0)
         {
-            logError("Shader compilation of shader '%s' failed because: %s\n", pParameters->pFilePath, (char*)pErrorBufferEncoding->GetBufferPointer());
-            return nullptr;
+            compilationResult.result = result_status_t::compilation_error;
+            compilationResult.pErrorMessage = (const char*)allocateBufferCopy(pGraphicsFrame->pFrameAllocator, pErrorBufferEncoding->GetBufferPointer(), pErrorBufferEncoding->GetBufferSize());
+            return compilationResult;
         }
     }
 
@@ -5710,8 +5879,8 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
     const HRESULT getBlobOutputResult = COM_CALL(pCompileResult->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pCompileShaderBlob), nullptr));
     if(getBlobOutputResult != S_OK)
     {
-        logError("Shader compilation of shader '%s' was successful but there's no shader blob. GetOutput() error: %s", pParameters->pFilePath, getHResultString(getBlobOutputResult));
-        return nullptr;
+        compilationResult.result = result_status_t::compilation_error;
+        return compilationResult;
     }
 
     DxcBuffer compiledShaderBuffer = {};
@@ -5722,8 +5891,8 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
     const HRESULT shaderReflectionResult = COM_CALL(pShaderCompilerContext->pUtils->CreateReflection(&compiledShaderBuffer, IID_PPV_ARGS(&pShaderReflection)));
     if(shaderReflectionResult != S_OK)
     {
-        logError("Could not reflect shader '%s' - %s", pParameters->pFilePath, getHResultString(shaderReflectionResult));
-        return nullptr;
+        compilationResult.result = result_status_t::reflection_error;
+        return compilationResult;
     }
 
     D3D12_SHADER_DESC shaderDesc = {};
@@ -5734,7 +5903,7 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
     uint32_t shaderresourceBindingCount = shaderDesc.BoundResources;
     if(shaderresourceBindingCount > maxShaderBindingPoints)
     {
-        logWarning("Shader '%s' has more bound resources than %u, some won't be accessible.", pParameters->pFilePath, maxShaderBindingPoints);
+        compilationResult.pWarningMessage = copyFormattedString(pGraphicsFrame->pFrameAllocator, "Shader '%s' has more bound resources than %u, some won't be accessible.", pCompilationParameters->pShaderName, maxShaderBindingPoints);
         shaderresourceBindingCount = maxShaderBindingPoints;
     }
 
@@ -5744,23 +5913,25 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
         const HRESULT resourceBindDescResult = COM_CALL(pShaderReflection->GetResourceBindingDesc(boundResourceIndex, &shaderInputBindDesc));
         if(resourceBindDescResult != S_OK)
         {
-            logError("Could not reflect shader '%s' bound resource '%u' - %s", pParameters->pFilePath, getHResultString(resourceBindDescResult));
-            return nullptr;
+            compilationResult.pErrorMessage = copyFormattedString(pGraphicsFrame->pFrameAllocator, "Could not reflect shader '%s' bound resource '%u' - %s", pCompilationParameters->pShaderName, getHResultString(resourceBindDescResult));
+            compilationResult.result = result_status_t::reflection_error;
+            return compilationResult;
         }
 
         strncpy(shaderBindingPoints[boundResourceIndex].name, shaderInputBindDesc.Name, maxShaderBindingPointNameLength);
         shaderBindingPoints[boundResourceIndex].slot                = rangeCheckCast<uint16_t>(shaderInputBindDesc.BindPoint);
         shaderBindingPoints[boundResourceIndex].space               = rangeCheckCast<uint16_t>(shaderInputBindDesc.Space);
         shaderBindingPoints[boundResourceIndex].type                = mapShaderInputType(shaderInputBindDesc.Type);
-        shaderBindingPoints[boundResourceIndex].shaderAccessMask    = shaderTypeFlag;
+        shaderBindingPoints[boundResourceIndex].shaderAccessMask    = pCompilationParameters->shaderType;
     }
 
     const uint32_t shaderBlobSizeInBytes = rangeCheckCast<uint32_t>(pCompileShaderBlob->GetBufferSize());
     uint8_t* pShaderBlobCopy = (uint8_t*)allocateFromAllocator(pGraphicsFrame->pMemoryAllocator, pCompileShaderBlob->GetBufferSize());
     if(pShaderBlobCopy == nullptr)
     {
-        logError("Shader compilation of shader '%s' was successful but we ran out of memory trying to copy the shader blob.", pParameters->pFilePath);
-        return nullptr;
+        compilationResult.pErrorMessage = copyFormattedString(pGraphicsFrame->pFrameAllocator, "Shader compilation of shader '%s' was successful but we ran out of memory trying to copy the shader blob.", pCompilationParameters->pShaderName);
+        compilationResult.result = result_status_t::out_of_memory;
+        return compilationResult;
     }
 
     memcpy(pShaderBlobCopy, pCompileShaderBlob->GetBufferPointer(), pCompileShaderBlob->GetBufferSize());
@@ -5769,7 +5940,8 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
     if(pShaderBinary == nullptr)
     {
         freeFromAllocator(pGraphicsFrame->pMemoryAllocator, pShaderBlobCopy);
-        return nullptr;
+        compilationResult.result = result_status_t::out_of_memory;
+        return compilationResult;
     }
 
     memcpy(pShaderBinary->bindingPoints, shaderBindingPoints, sizeof(shaderBindingPoints));
@@ -5777,7 +5949,73 @@ NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* p
     pShaderBinary->pShaderBlob              = pShaderBlobCopy;
     pShaderBinary->shaderBlobSizeInBytes    = shaderBlobSizeInBytes;
 
-    return pShaderBinary;
+    compilationResult.result = result_status_t::success;
+    compilationResult.pShaderBinary = pShaderBinary;
+    return compilationResult;
+}
+
+NO_DISCARD shader_binary_t* compileShaderCode(graphics_frame_t* pGraphicsFrame, const char* pShaderCode, const uint64_t shaderCodeLength, const char* pEntryPoint, const char* pDefines, const char* pShaderName, const shader_type_t shaderType, const shader_model_t shaderModel = shader_model_t::model_6_0)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pShaderCode != nullptr);
+    ASSERT_DEBUG(pEntryPoint != nullptr);
+    ASSERT_DEBUG(pShaderName != nullptr);
+    ASSERT_DEBUG(shaderCodeLength > 0);
+
+    shader_compilation_parameters_t compilationParameters = {};
+    compilationParameters.pEntryPoint = pEntryPoint;
+    compilationParameters.pShaderProfile = createShaderProfileName(pGraphicsFrame->pFrameAllocator, shaderType, shaderModel);
+    compilationParameters.pDefines = pDefines;
+    compilationParameters.pShaderName = pShaderName;
+
+    shader_compilation_result_t compilationResult = compileShaderCodeInternally(pGraphicsFrame, pShaderCode, shaderCodeLength, &compilationParameters);
+    if(compilationResult.pErrorMessage != nullptr)
+    {
+        logError(compilationResult.pErrorMessage);
+    }
+    else if(compilationResult.pWarningMessage != nullptr)
+    {
+        logWarning(compilationResult.pWarningMessage);
+    }
+
+    freeCompilationResult(pGraphicsFrame->pFrameAllocator, &compilationResult);
+    return compilationResult.pShaderBinary;
+}
+
+NO_DISCARD shader_binary_t* loadAndCompileShaderCodeFromFile(graphics_frame_t* pGraphicsFrame, const char* pShaderFilePath, const char* pEntryPoint, const char* pDefines, const char* pShaderName, const shader_type_t shaderType, const shader_model_t shaderModel = shader_model_t::model_6_0)
+{
+    ASSERT_DEBUG(pGraphicsFrame != nullptr);
+    ASSERT_DEBUG(pShaderFilePath != nullptr);
+    ASSERT_DEBUG(pEntryPoint != nullptr);
+    ASSERT_DEBUG(pDefines != nullptr);
+    ASSERT_DEBUG(pShaderName != nullptr);
+
+    result_t<memory_buffer_t> shaderCodeResult = readWholeFileIntoNewBuffer(pGraphicsFrame->pFrameAllocator, pShaderFilePath);
+    if(!isResultSuccessful(shaderCodeResult))
+    {
+        logError("Could not read shader file '%s' - error: %s.", pShaderFilePath, getResultString(shaderCodeResult));
+        return nullptr;
+    }
+    
+    shader_compilation_parameters_t compilationParameters = {};
+    compilationParameters.pEntryPoint = pEntryPoint;
+    compilationParameters.pShaderProfile = createShaderProfileName(pGraphicsFrame->pFrameAllocator, shaderType, shaderModel);
+    compilationParameters.pDefines = pDefines;
+    compilationParameters.pShaderName = pShaderName;
+
+    shader_compilation_result_t compilationResult = compileShaderCodeInternally(pGraphicsFrame, (const char*)shaderCodeResult.value.pData, shaderCodeResult.value.sizeInBytes, &compilationParameters);
+    if(compilationResult.pErrorMessage != nullptr)
+    {
+        logError(compilationResult.pErrorMessage);
+    }
+    else if(compilationResult.pWarningMessage != nullptr)
+    {
+        logWarning(compilationResult.pWarningMessage);
+    }
+
+    freeCompilationResult(pGraphicsFrame->pFrameAllocator, &compilationResult);
+    freeFromAllocator(pGraphicsFrame->pFrameAllocator, shaderCodeResult.value.pData);
+    return compilationResult.pShaderBinary;
 }
 
 void destroyFence(ID3D12Fence* pFence)

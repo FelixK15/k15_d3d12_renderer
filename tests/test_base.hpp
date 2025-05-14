@@ -169,11 +169,11 @@ indexed_mesh_t* createIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_alloc
     return pMesh;
 }
 
-material_t* createMaterial(graphics_frame_t* pGraphicsFrame, const char* pName, memory_allocator_t* pMemoryAllocator, vertex_format_t* pVertexFormat, const shader_compilation_parameters_t* pVertexShaderParameters, const shader_compilation_parameters_t* pPixelShaderParameters)
+material_t* createMaterial(graphics_frame_t* pGraphicsFrame, const char* pName, memory_allocator_t* pMemoryAllocator, vertex_format_t* pVertexFormat, const char* pVertexShader, const char* pPixelShader)
 {
     graphics_pipeline_parameters_t pipelineParameters = {};
-    pipelineParameters.pVertexShader   = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pVertexShaderParameters, shader_type_flag_t::vertex_shader);
-    pipelineParameters.pPixelShader    = loadAndCompileShaderCodeFromFile(pGraphicsFrame, pPixelShaderParameters, shader_type_flag_t::pixel_shader);
+    pipelineParameters.pVertexShader   = compileShaderCode(pGraphicsFrame, pVertexShader, getStringLength(pVertexShader), "main", nullptr, "VertexShader", shader_type_t::vertex_shader, shader_model_t::model_6_0);
+    pipelineParameters.pPixelShader    = compileShaderCode(pGraphicsFrame, pPixelShader, getStringLength(pPixelShader), "main", nullptr, "PixelShader", shader_type_t::pixel_shader, shader_model_t::model_6_0);
     pipelineParameters.pVertexFormat   = pVertexFormat;
     pipelineParameters.pName           = pName;
 	pipelineParameters.topology 	   = topology_t::triangle_list;
@@ -192,12 +192,6 @@ void destroyMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemoryAl
 		pMesh->pVertexBuffer = nullptr;
 	}
 
-	if(pMesh->pVertexFormat != nullptr)
-	{
-    	releaseVertexFormat(pGraphicsFrame, pMesh->pVertexFormat);
-		pMesh->pVertexFormat = nullptr;
-	}
-
     freeFromAllocator(pMemoryAllocator, pMesh);
 }
 
@@ -213,12 +207,6 @@ void destroyIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pM
 	{
 	    releaseGpuBuffer(pGraphicsFrame, pMesh->pIndexBuffer);
 		pMesh->pIndexBuffer = nullptr;
-	}
-
-	if(pMesh->pVertexFormat != nullptr)
-	{
-    	releaseVertexFormat(pGraphicsFrame, pMesh->pVertexFormat);
-		pMesh->pVertexFormat = nullptr;
 	}
 
     freeFromAllocator(pMemoryAllocator, pMesh);

@@ -1,4 +1,89 @@
+const char computeTexturePixelShader[] = R"(
+SamplerState mySampler : register(s0, space1);
+Texture2D texture : register(t0, space2);
 
+struct PixelInput
+{
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
+};
+
+float4 main(PixelInput input) : SV_Target
+{
+    return texture.Sample(mySampler, input.uv);
+}
+)";
+
+const char computeTextureVertexShader[] = R"(
+cbuffer SpinningCubeData : register(b0, space0)
+{
+    float4x4 viewMatrix;
+    float4x4 projMatrix;
+    float4x4 viewProjMatrix2;
+    float4x4 modelMatrix;
+};
+
+struct VertexInput
+{
+    float3 pos : POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
+};
+
+struct VertexOutput
+{
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD;
+    float3 normal : NORMAL;
+};
+
+VertexOutput main(VertexInput vertexInput)
+{
+    float4x4 viewProjMatrix = mul(viewMatrix, projMatrix);
+    float4x4 modelViewProjMatrix = mul(modelMatrix, viewProjMatrix);
+
+    VertexOutput output;
+    output.pos = mul(float4(vertexInput.pos, 1.0f), modelViewProjMatrix);
+    output.uv = vertexInput.uv;
+    output.normal = vertexInput.normal;
+    return output;
+}
+)";
+
+const char computeTextureComputeShader[] = R"(
+cbuffer TextureGenBuffer : register(b0, space0)
+{
+    uint textureWidth;
+    uint color0;
+    uint color1;
+};
+
+RWStructuredBuffer<uint> textureBuffer : register(u0, space1);
+
+[numthreads(8,8,1)]
+void main( uint3 groupId : SV_GroupID )
+{
+    uint textureBlockStartX = groupId.x * 8;
+    uint textureBlockStartY = groupId.y * 8;
+    uint textureBlockEndX = textureBlockStartX + 8;
+    uint textureBlockEndY = textureBlockStartY + 8;
+
+    uint color = color0;
+    if( ( groupId.x & 1 ) == 0 && ( groupId.y & 1 ) == 0 )
+    {
+        color = color1;
+    }
+
+    for(uint y = textureBlockStartY; y < textureBlockEndY; ++y)
+    {
+        for(uint x = textureBlockStartX; x < textureBlockEndX; ++x)
+        {
+            textureBuffer[x + y * textureWidth] = color;
+        }
+    }
+}
+)";
 
 struct compute_texture_data_t
 {
@@ -98,19 +183,6 @@ void doComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 
 bool initComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 {
-    shader_compilation_parameters_t vs_para = {};
-    vs_para.pEntryPoint = "main";
-    vs_para.pFilePath = "compute_texture/vertex_shader.hlsl";
-    vs_para.pShaderProfile = "vs_6_0";
-
-    shader_compilation_parameters_t ps_para = vs_para;
-    ps_para.pFilePath = "compute_texture/pixel_shader.hlsl";
-    ps_para.pShaderProfile = "ps_6_0";
-
-    shader_compilation_parameters_t cs_para = vs_para;
-    cs_para.pFilePath = "compute_texture/compute_shader.hlsl";
-    cs_para.pShaderProfile = "cs_6_0";
-
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)allocateFromAllocator(pFrameParameter->pAllocator, sizeof(compute_texture_test_data_t), alloc_flags_t::clear_memory);
     if(pTestData == nullptr)
     {
@@ -124,7 +196,7 @@ bool initComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
         return false;
     }
 
-    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Compute Texture Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, &vs_para, &ps_para);
+    material_t* pMaterial = createMaterial(pFrameParameter->pGraphicsFrame, "Compute Texture Material", pFrameParameter->pAllocator, pMesh->pVertexFormat, computeTextureVertexShader, computeTexturePixelShader);
     if(pMaterial == nullptr)
     {
         freeFromAllocator(pFrameParameter->pAllocator, pTestData);
@@ -165,7 +237,7 @@ bool initComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
     pTestData->pSpinningCubeConstantBuffers[1] = createGpuBuffer(pFrameParameter->pGraphicsFrame, sizeof(spinning_cube_constant_buffer_data_t), nullptr, gpu_buffer_usage_flag_t::constant_buffer, gpu_memory_usage_hint_t::cpuWriteGpuReadAccess, "Spinning Cube Constant Buffer");
     pTestData->pTexture = createGpuTexture(pFrameParameter->pGraphicsFrame, createUint3(textureWidth, textureHeight, 1), 1u, nullptr, gpu_texture_usage_flag_t::shader_resource_view, gpu_texture_format_t::R8G8B8A8, gpu_texture_format_type_t::normalized_unsigned_int, "Procedural Texture");
     pTestData->pComputeTextureBuffer = createGpuBuffer(pFrameParameter->pGraphicsFrame, textureWidth * textureHeight * 4, nullptr, gpu_buffer_usage_flag_t::storage_buffer, gpu_memory_usage_hint_t::gpuExclusiveAccess, "ComputeTextureBuffer" );
-    pTestData->pComputeShader = loadAndCompileShaderCodeFromFile(pFrameParameter->pGraphicsFrame, &cs_para, shader_type_flag_t::compute_shader);
+    pTestData->pComputeShader = compileShaderCode(pFrameParameter->pGraphicsFrame, computeTextureComputeShader, getStringLength(computeTextureComputeShader), "main", nullptr, "Generate Texture Shader", shader_type_t::compute_shader);
     pTestData->pComputePipeline = createComputePipeline(pFrameParameter->pGraphicsFrame, pTestData->pComputeShader, "ComputeTexture");
     pTestData->pMesh = pMesh;
     pTestData->pMaterial = pMaterial;
@@ -177,11 +249,12 @@ bool initComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 void shutdownComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
 {
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)pFrameParameter->pUserData;
-    freeGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[0]);
-    freeGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[1]);
-    freeGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[0]);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[1]);
+    releaseGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
 
-    //destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
+    releaseComputePipeline(pFrameParameter->pGraphicsFrame, pTestData->pComputePipeline);
+    destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyIndexedMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);
     freeFromAllocator(pFrameParameter->pAllocator, pTestData);
 }
