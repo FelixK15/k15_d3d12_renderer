@@ -37,6 +37,8 @@ struct vector2f_t
 struct material_t
 {
 	graphics_pipeline_t* pGraphicsPipeline;
+    shader_binary_t* pVertexShaderBinary;
+    shader_binary_t* pPixelShaderBinary;
 };
 
 struct mesh_t
@@ -171,16 +173,45 @@ indexed_mesh_t* createIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_alloc
 
 material_t* createMaterial(graphics_frame_t* pGraphicsFrame, const char* pName, memory_allocator_t* pMemoryAllocator, vertex_format_t* pVertexFormat, const char* pVertexShader, const char* pPixelShader)
 {
+    shader_binary_t* pVertexShaderBinary = compileShaderCode(pGraphicsFrame, pVertexShader, getStringLength(pVertexShader), "main", nullptr, "VertexShader", shader_type_t::vertex_shader, shader_model_t::model_6_0);
+    if(pVertexShader == nullptr)
+    {
+        return nullptr;
+    }
+
+    shader_binary_t* pPixelShaderBinary = compileShaderCode(pGraphicsFrame, pPixelShader, getStringLength(pPixelShader), "main", nullptr, "PixelShader", shader_type_t::pixel_shader, shader_model_t::model_6_0);
+    if(pPixelShader == nullptr)
+    {
+        return nullptr;
+    }
+
     graphics_pipeline_parameters_t pipelineParameters = {};
-    pipelineParameters.pVertexShader   = compileShaderCode(pGraphicsFrame, pVertexShader, getStringLength(pVertexShader), "main", nullptr, "VertexShader", shader_type_t::vertex_shader, shader_model_t::model_6_0);
-    pipelineParameters.pPixelShader    = compileShaderCode(pGraphicsFrame, pPixelShader, getStringLength(pPixelShader), "main", nullptr, "PixelShader", shader_type_t::pixel_shader, shader_model_t::model_6_0);
+    pipelineParameters.pVertexShader   = pVertexShaderBinary;
+    pipelineParameters.pPixelShader    = pPixelShaderBinary;
     pipelineParameters.pVertexFormat   = pVertexFormat;
     pipelineParameters.pName           = pName;
 	pipelineParameters.topology 	   = topology_t::triangle_list;
 
     graphics_pipeline_t* pDefaultPipelineObject = createGraphicsPipeline(pGraphicsFrame, &pipelineParameters);
+    if(pDefaultPipelineObject == nullptr)
+    {
+        releaseShaderBinary(pGraphicsFrame, pVertexShaderBinary);
+        releaseShaderBinary(pGraphicsFrame, pPixelShaderBinary);
+        return nullptr;
+    }
+
     material_t* pMaterial = (material_t*)allocateFromAllocator(pMemoryAllocator, sizeof(material_t), alloc_flags_t::clear_memory);
-    pMaterial->pGraphicsPipeline = pDefaultPipelineObject;
+    if(pMaterial == nullptr)
+    {
+        releaseShaderBinary(pGraphicsFrame, pVertexShaderBinary);
+        releaseShaderBinary(pGraphicsFrame, pPixelShaderBinary);
+        releaseGraphicsPipeline(pGraphicsFrame, pDefaultPipelineObject);
+        return nullptr;
+    }
+
+    pMaterial->pVertexShaderBinary  = pVertexShaderBinary;
+    pMaterial->pPixelShaderBinary   = pPixelShaderBinary;
+    pMaterial->pGraphicsPipeline    = pDefaultPipelineObject;
     return pMaterial;
 }
 
@@ -190,6 +221,12 @@ void destroyMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemoryAl
 	{
 	    releaseGpuBuffer(pGraphicsFrame, pMesh->pVertexBuffer);
 		pMesh->pVertexBuffer = nullptr;
+	}
+
+    if(pMesh->pVertexFormat != nullptr)
+	{
+	    releaseVertexFormat(pGraphicsFrame, pMesh->pVertexFormat);
+		pMesh->pVertexFormat = nullptr;
 	}
 
     freeFromAllocator(pMemoryAllocator, pMesh);
@@ -209,6 +246,12 @@ void destroyIndexedMesh(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pM
 		pMesh->pIndexBuffer = nullptr;
 	}
 
+    if(pMesh->pVertexFormat != nullptr)
+    {
+        releaseVertexFormat(pGraphicsFrame, pMesh->pVertexFormat);
+        pMesh->pVertexFormat = nullptr;
+    }
+
     freeFromAllocator(pMemoryAllocator, pMesh);
 }
 
@@ -219,6 +262,19 @@ void destroyMaterial(graphics_frame_t* pGraphicsFrame, memory_allocator_t* pMemo
 	    releaseGraphicsPipeline(pGraphicsFrame, pMaterial->pGraphicsPipeline);
 		pMaterial->pGraphicsPipeline = nullptr;
 	}
+
+    if(pMaterial->pVertexShaderBinary != nullptr)
+    {
+        releaseShaderBinary(pGraphicsFrame, pMaterial->pVertexShaderBinary);
+        pMaterial->pVertexShaderBinary = nullptr;
+    }
+
+    if(pMaterial->pPixelShaderBinary != nullptr)
+    {
+        releaseShaderBinary(pGraphicsFrame, pMaterial->pPixelShaderBinary);
+        pMaterial->pPixelShaderBinary = nullptr;
+    }
+    
     freeFromAllocator(pMemoryAllocator, pMaterial);
 }
 

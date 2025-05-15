@@ -251,8 +251,12 @@ void shutdownComputeTextureSample(sample_frame_parameter_t* pFrameParameter)
     compute_texture_test_data_t* pTestData = (compute_texture_test_data_t*)pFrameParameter->pUserData;
     releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[0]);
     releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffers[1]);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pComputeConstBuffers[0]);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pComputeConstBuffers[1]);
+    releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pComputeTextureBuffer);
     releaseGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
-
+    releaseTextureSampler(pFrameParameter->pGraphicsFrame, pTestData->pSampler);
+    releaseShaderBinary(pFrameParameter->pGraphicsFrame, pTestData->pComputeShader);
     releaseComputePipeline(pFrameParameter->pGraphicsFrame, pTestData->pComputePipeline);
     destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyIndexedMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);

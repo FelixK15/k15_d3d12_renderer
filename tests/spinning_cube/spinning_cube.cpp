@@ -162,6 +162,7 @@ void shutdownSpinningCubeSample(sample_frame_parameter_t* pFrameParameter)
     spinning_cube_test_data_t* pTestData = (spinning_cube_test_data_t*)pFrameParameter->pUserData;
     releaseGpuBuffer(pFrameParameter->pGraphicsFrame, pTestData->pSpinningCubeConstantBuffer);
     releaseGpuTexture(pFrameParameter->pGraphicsFrame, pTestData->pTexture);
+    releaseTextureSampler(pFrameParameter->pGraphicsFrame, pTestData->pSampler);
 
     destroyMaterial(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMaterial);
     destroyIndexedMesh(pFrameParameter->pGraphicsFrame, pFrameParameter->pAllocator, pTestData->pMesh);
