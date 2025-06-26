@@ -4,7 +4,7 @@ set C_FILES=..\tests\test_base_imgui.cpp ..\tests\imgui\imgui.cpp ..\tests\imgui
 set OUTPUT_FILE_NAME=samples
 set BUILD_CONFIGURATION=%1
 set OUTPUT_FOLDER=..\win32\build
-set FILES_TO_COPY=x64\*.dll ..\tests\spinning_cube\smiley.png
+set FILES_TO_COPY=x64\*.dll ..\tests\spinning_cube\smiley.png ..\tests\sponza\Box.gltf ..\tests\sponza\Box0.bin
 call build_cl.bat
 
 exit /b 0

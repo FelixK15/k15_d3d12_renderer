@@ -76,6 +76,7 @@ struct sample_frame_parameter_t
 #include "render_triangle\render_triangle.cpp"
 #include "spinning_cube\spinning_cube.cpp"
 #include "compute_texture\compute_texture.cpp"
+#include "sponza\sponza.cpp"
 #pragma comment(lib, "Advapi32.lib")
 
 descriptor_heap_t* pImGuiDescriptorHeap = nullptr;
@@ -86,6 +87,7 @@ enum sample_type_t : uint8_t
     render_triangle,
     spinning_cube,
     compute_texture_sample,
+    sponza,
 
     sample_count
 };
@@ -94,7 +96,8 @@ const char* pSampleNames[] = {
     "Clear Background",
     "Render Triangle",
     "Spinning Cube",
-    "Compute Texture"
+    "Compute Texture",
+    "Sponza"
 };
 static_assert(ARRAY_SIZE(pSampleNames) == sample_type_t::sample_count);
 
@@ -176,6 +179,23 @@ cleanup_and_exit:
     return success;
 }
 
+bool readActiveSampleFromRegistry(char* pSampleNameBuffer, uint32_t sampleNameBufferSize)
+{
+    HKEY regKey;
+    DWORD dataSize = sampleNameBufferSize;
+    bool success = false;
+    if(RegCreateKeyA(HKEY_CURRENT_USER, "SOFTWARE\\K15TECH\\D3D12RENDERER", &regKey) == ERROR_SUCCESS)
+    {
+        if(RegGetValueA(regKey, "", "active_sample", RRF_RT_REG_SZ, nullptr, pSampleNameBuffer, &dataSize) == ERROR_SUCCESS)
+        {
+            success = true;
+        }
+    }
+
+    RegCloseKey(regKey);
+    return success;
+}
+
 bool writeWindowParametersToRegistry(const window_parameter_t* pParameter)
 {
     HKEY regKey;
@@ -207,6 +227,34 @@ bool writeWindowParametersToRegistry(const window_parameter_t* pParameter)
 
     success = true;
 
+cleanup_and_exit:
+    RegCloseKey(regKey);
+
+    return success;
+}
+
+bool writeActiveSampleNameToRegistry(const char* pSampleName)
+{
+    HKEY regKey;
+    bool success = false;
+    if(RegCreateKeyA(HKEY_CURRENT_USER, "SOFTWARE\\K15TECH\\D3D12RENDERER", &regKey) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    const uint32_t sampleNameLength = (uint32_t)strlen(pSampleName);
+    constexpr uint32_t maxSampleNameLength = 64;
+    if(sampleNameLength > maxSampleNameLength)
+    {
+        goto cleanup_and_exit;
+    }
+
+    if(RegSetValueExA(regKey, "active_sample", 0, REG_SZ, (const BYTE*)pSampleName, sampleNameLength) != ERROR_SUCCESS)
+    {
+        goto cleanup_and_exit;
+    }
+
+    success = true;
 cleanup_and_exit:
     RegCloseKey(regKey);
 
@@ -289,6 +337,9 @@ void shutdownSample(sample_frame_parameter_t* pSampleFrameParameter, const sampl
         case sample_type_t::compute_texture_sample:
             shutdownComputeTextureSample(pSampleFrameParameter);
             break;
+        case sample_type_t::sponza:
+            shutdownSponzaSample(pSampleFrameParameter);
+            break;
         case 0xFF:
             break;
         default:
@@ -312,6 +363,9 @@ void initSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_ty
         case sample_type_t::compute_texture_sample:
             initComputeTextureSample(pSampleFrameParameter);
             break;
+        case sample_type_t::sponza:
+            initSponzaSample(pSampleFrameParameter);
+            break;
         default:
             ASSERT_DEBUG_UNREACHABLE_CODE();
             break;
@@ -333,6 +387,9 @@ void doSample(sample_frame_parameter_t* pSampleFrameParameter, const sample_type
             break;
         case sample_type_t::compute_texture_sample:
             doComputeTextureSample(pSampleFrameParameter);
+            break;
+        case sample_type_t::sponza:
+            doSponzaSample(pSampleFrameParameter);
             break;
         default:
             ASSERT_DEBUG_UNREACHABLE_CODE();
@@ -363,6 +420,8 @@ void doGeneralSampleImGuiFrame(sample_frame_parameter_t* pSampleFrameParameter)
             {
                 if(*pSampleFrameParameter->pActiveSampleIndex != sampleIndex)
                 {
+                    writeActiveSampleNameToRegistry(pSampleNames[sampleIndex]);
+
                     shutdownSample(pSampleFrameParameter, (sample_type_t)*pSampleFrameParameter->pActiveSampleIndex);
                     initSample(pSampleFrameParameter, (sample_type_t)sampleIndex);
 
