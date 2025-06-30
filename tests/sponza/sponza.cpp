@@ -238,23 +238,23 @@ union parse_pos_t
     __m256i vec;
     char    chars[32];    //for better debugging
 };
-static_assert(sizeof(__m256i) == sizeof(parse_pos_t::chars));
-
-struct gltf_parser_context_t
-{
-    bool                success;
-    gltf_description_t* pGltfDescription;
-    const parse_pos_t*  pCurrentParsePos;
-    const void*         pEndGltfBuffer;
-    char                errorMessage[256];
-};
+static_assert(sizeof(parse_pos_t::vec) == sizeof(parse_pos_t::chars));
 
 struct gltf_load_result_t
 {
     bool success;
     char errorMessage[256];
 };
-static_assert(sizeof(gltf_load_result_t::errorMessage) == sizeof(gltf_parser_context_t::errorMessage));
+
+struct gltf_parser_context_t
+{
+    int                 lineIndex;
+    int                 charIndex;
+    gltf_load_result_t  result;
+    gltf_description_t* pGltfDescription;
+    const parse_pos_t*  pCurrentParsePos;
+    const void*         pEndGltfBuffer;
+};
 
 enum class parser_state_t
 {
@@ -268,239 +268,369 @@ enum class parser_state_t
     read_accessors
 };
 
-void setGltfParserContextError(gltf_parser_context_t* pParseContext, const char* pFormat, ...)
+void setGltfParserContextError(gltf_parser_context_t* pParserContext, const char* pFormat, ...)
 {
-    pParseContext->success = false;
+    pParserContext->result.success = false;
+
+    int errorMessageBufferSize = sizeof(gltf_load_result_t::errorMessage);
+    const int lineIndex = pParserContext->lineIndex + 1;
+    const int charIndex = pParserContext->charIndex + 1;
+    const int errorMessagePrefixSize = sprintf_s(pParserContext->result.errorMessage, errorMessageBufferSize, "line:%d char:%d: ", lineIndex, charIndex);
+
+    errorMessageBufferSize -= errorMessagePrefixSize;
 
     va_list vaList;
     va_start(vaList, pFormat);
-    vsprintf_s(pParseContext->errorMessage, sizeof(gltf_parser_context_t::errorMessage), pFormat, vaList);
+    vsprintf_s(pParserContext->result.errorMessage + errorMessagePrefixSize, errorMessageBufferSize, pFormat, vaList);
     va_end(vaList);
 }
 
-bool skipGltfForCharAmount(gltf_parser_context_t* pParseContext, const uint32_t numCharsToSkip)
+bool advanceGltfParserForCharAmount(gltf_parser_context_t* pParserContext, const uint32_t numCharsToSkip)
 {
-    const parse_pos_t* pNextParsePos = (parse_pos_t*)((char*)pParseContext->pCurrentParsePos + numCharsToSkip);
-    if(pNextParsePos >= pParseContext->pEndGltfBuffer)
+    const __m256i newLines = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, _mm256_set1_epi8('\n'));
+    const int validCharMask = (1 << numCharsToSkip) - 1;
+    const int newLineMask = _mm256_movemask_epi8(newLines) & validCharMask;
+    const int newLineCount = __popcnt(newLineMask);
+
+    if(newLineCount > 0)
     {
-        setGltfParserContextError(pParseContext, "Trying to read past gltf buffer - current parse pos: '%s'", pParseContext->pCurrentParsePos->chars);
+        unsigned long lastNewLineIndex = 0;
+        _BitScanReverse(&lastNewLineIndex, newLineMask);
+        pParserContext->lineIndex += newLineCount;
+        pParserContext->charIndex = lastNewLineIndex == numCharsToSkip ? 0 : numCharsToSkip - lastNewLineIndex;
+    }
+    else
+    {
+        pParserContext->charIndex += numCharsToSkip;
+    }
+    
+    const parse_pos_t* pNextParsePos = (parse_pos_t*)((char*)pParserContext->pCurrentParsePos + numCharsToSkip);
+    if(pNextParsePos >= pParserContext->pEndGltfBuffer)
+    {
+        setGltfParserContextError(pParserContext, "Trying to read past gltf buffer - current parse pos: '%s'", pParserContext->pCurrentParsePos->chars);
         return false;
     }
 
-    pParseContext->pCurrentParsePos = pNextParsePos;
+    pParserContext->pCurrentParsePos = pNextParsePos;
     return true;
 }
 
-bool skipGltfUntilCharToken(gltf_parser_context_t* pParseContext, const char token)
+bool advanceGltfParserToTokenAndIgnoreAllOtherTokens(gltf_parser_context_t* pParserContext, const char tokenToFind)
 {
+    const __m256i token = _mm256_set1_epi8(tokenToFind);
     while(true)
     {
-        const __m256i tokenResult = _mm256_cmpeq_epi8(pParseContext->pCurrentParsePos->vec, _mm256_set1_epi8(token));
-        unsigned int tokenMask = _mm256_movemask_epi8(tokenResult);
+        const __m256i compareResult = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, token);
+        const int tokenMask = _mm256_movemask_epi8(compareResult);
+
         if(tokenMask == 0)
         {
-            const parse_pos_t* pNextParsePos = pParseContext->pCurrentParsePos + 1;
-            if(pNextParsePos >= pParseContext->pEndGltfBuffer)
+            if(!advanceGltfParserForCharAmount(pParserContext, 32))
             {
-                setGltfParserContextError(pParseContext, "Trying to read past gltf buffer - current parse pos: '%s'", pParseContext->pCurrentParsePos->chars);
                 return false;
             }
 
-            pParseContext->pCurrentParsePos = pNextParsePos;
             continue;
         }
-        else
+        
+        unsigned long tokenPos = 0;
+        _BitScanForward(&tokenPos, tokenMask);
+        if(tokenPos == 0)
         {
-            unsigned long tokenPos = 0;
-            _BitScanForward(&tokenPos, tokenMask);
-            return skipGltfForCharAmount(pParseContext, tokenPos);
+            break;
         }
-    }
-    
-    return false;
-}
 
-bool skipGltfUntilAfterCharToken(gltf_parser_context_t* pParseContext, const char token)
-{
-    if(!skipGltfUntilCharToken(pParseContext, token))
-    {
-        return false;
-    }
-
-    const parse_pos_t* pNextParsePos = (parse_pos_t*)((char*)pParseContext->pCurrentParsePos + 1);
-    if(pNextParsePos == pParseContext->pEndGltfBuffer)
-    {
-        setGltfParserContextError(pParseContext, "Trying to read past gltf buffer - current parse pos: '%s'", pParseContext->pCurrentParsePos->chars);
-        return false;
-    }
-
-    pParseContext->pCurrentParsePos = pNextParsePos;
-    return true;
-}
-
-bool readGltfObjectName(gltf_parser_context_t* pParseContext, char* pObjectNameBuffer, const uint32_t objectNameBufferLength)
-{
-    if(!skipGltfUntilCharToken(pParseContext, '"'))
-    {
-        return false;
-    }
-
-    const __m256i quoteMask = _mm256_cmpeq_epi8(pParseContext->pCurrentParsePos->vec, _mm256_set1_epi8('"'));
-    unsigned int quoteMaskBits = _mm256_movemask_epi8(quoteMask);
-    if(__popcnt(quoteMaskBits) < 2)
-    {
-        setGltfParserContextError(pParseContext, "Error trying to read object name in line '%s' - couldn't find matching quotes.", pParseContext->pCurrentParsePos->chars);
-        return false;
-    }
-
-    unsigned long openQuoteBitPos = 0;
-    unsigned long closeQuoteBitPos = 0;
-    _BitScanForward(&openQuoteBitPos, quoteMaskBits);
-    quoteMaskBits &= ~(1 << openQuoteBitPos);
-    _BitScanForward(&closeQuoteBitPos, quoteMaskBits);
-
-    if(openQuoteBitPos == closeQuoteBitPos)
-    {
-        setGltfParserContextError(pParseContext, "Error trying to read object name in line '%s'.", pParseContext->pCurrentParsePos->chars);
-        return false;
-    }
-
-    const uint32_t objectNameLength = (closeQuoteBitPos - openQuoteBitPos) - 1;
-    if(objectNameLength > objectNameBufferLength)
-    {
-        setGltfParserContextError(pParseContext, "Error trying to read object name in line '%s' - object name is too long.", pParseContext->pCurrentParsePos->chars);
-        return false;
-    }
-
-    memcpy(pObjectNameBuffer, pParseContext->pCurrentParsePos->chars + openQuoteBitPos + 1, objectNameLength);
-    return skipGltfUntilAfterCharToken(pParseContext, ':');
-}
-
-parser_state_t mapObjectNameToParserState(const char* pObjectName)
-{
-    if(strcmp(pObjectName, "meshes") == 0)
-    {
-        return parser_state_t::read_meshes;
-    }
-    else if(strcmp(pObjectName, "materials") == 0)
-    {
-        return parser_state_t::read_materials;
-    }
-    else if(strcmp(pObjectName, "bufferViews") == 0)
-    {
-        return parser_state_t::read_buffer_views;
-    }
-    else if(strcmp(pObjectName, "buffers") == 0)
-    {
-        return parser_state_t::read_buffers;
-    }
-    else if(strcmp(pObjectName, "accessors") == 0)
-    {
-        return parser_state_t::read_accessors;
-    }
-
-    return parser_state_t::skip_object;
-}
-
-bool skipGltfObject(gltf_parser_context_t* pParseContext)
-{
-    if(pParseContext->pCurrentParsePos->chars[0] == ' ')
-    {
-        if(!skipGltfUntilAfterCharToken(pParseContext, ' '))
+        if(!advanceGltfParserForCharAmount(pParserContext, tokenPos))
         {
             return false;
         }
     }
 
-    const bool isObjectOrArray = pParseContext->pCurrentParsePos->chars[0] == '{' || pParseContext->pCurrentParsePos->chars[0] == '[';
-    if(!isObjectOrArray)
+    return true;
+}
+
+bool advanceGltfParserAndIgnoreTokens(gltf_parser_context_t* pParserContext, const char* pTokensToIgnore, const int tokenCount)
+{
+    while(true)
     {
-        return skipGltfUntilAfterCharToken(pParseContext, '\n');
+        __m256i filter = _mm256_setzero_si256();
+        for(int i = 0; i < tokenCount; ++i)
+        {
+            filter = _mm256_or_si256(filter, _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, _mm256_set1_epi8(pTokensToIgnore[i])));
+        }
+
+        const unsigned int filterMask = _mm256_movemask_epi8(filter);
+        if(filterMask == 0xFFFFFFFF)
+        {
+            if(!advanceGltfParserForCharAmount(pParserContext, 32u))
+            {
+                return false;
+            }
+            continue;
+        }
+        else if(filterMask == 0)
+        {
+            break;
+        }
+
+        unsigned long tokenPos = 0;
+        _BitScanForward(&tokenPos, ~filterMask);
+        if(tokenPos == 0)
+        {
+            break;
+        }
+
+        if(!advanceGltfParserForCharAmount(pParserContext, tokenPos))
+        {
+            return false;
+        }
+        break;
     }
 
-    if(!skipGltfForCharAmount(pParseContext, 1))
+    return true;
+}
+
+bool advanceGltfParserToNextNonWhitespaceToken(gltf_parser_context_t* pParserContext)
+{
+    const char whitespaceTokens[] = {
+        ' ', '\n', '\r', '\t'
+    };
+
+    return advanceGltfParserAndIgnoreTokens(pParserContext, whitespaceTokens, ARRAY_SIZE(whitespaceTokens));
+}
+
+bool advanceGltfParserToNextLine(gltf_parser_context_t* pParserContext)
+{
+    if(!advanceGltfParserToTokenAndIgnoreAllOtherTokens(pParserContext, '\n'))
     {
         return false;
     }
 
-    const __m256i openCurlyBrackets = _mm256_set1_epi8('{');
-    const __m256i closeCurlyBrackets = _mm256_set1_epi8('}');
-    const __m256i openSquareBrackets = _mm256_set1_epi8('[');
-    const __m256i closingSquareBracets = _mm256_set1_epi8(']');
+    return advanceGltfParserForCharAmount(pParserContext, 1);
+}
 
-    uint32_t objectDepth = 1;
-    while(objectDepth > 0)
+bool advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(gltf_parser_context_t* pParserContext, const char expectedToken)
+{
+    if(!advanceGltfParserToNextNonWhitespaceToken(pParserContext))
     {
-        const __m256i openBracketsCmpResult = _mm256_or_si256(_mm256_cmpeq_epi8(pParseContext->pCurrentParsePos->vec, openCurlyBrackets), _mm256_cmpeq_epi8(pParseContext->pCurrentParsePos->vec, openSquareBrackets));
-        const __m256i closingBracketsCmpResult = _mm256_or_si256(_mm256_cmpeq_epi8(pParseContext->pCurrentParsePos->vec, closeCurlyBrackets), _mm256_cmpeq_epi8(pParseContext->pCurrentParsePos->vec, closingSquareBracets));
+        return false;
+    }
+
+    const char token = pParserContext->pCurrentParsePos->chars[0];
+    if(token != expectedToken)
+    {
+        setGltfParserContextError(pParserContext, "Unexpected token, read '%c' but expected '%c'", token, expectedToken);
+        return false;
+    }
+
+    return advanceGltfParserForCharAmount(pParserContext, 1);
+}
+
+bool readGltfObjectName(gltf_parser_context_t* pParserContext, char* pObjectNameBuffer, const uint32_t objectNameBufferLength)
+{
+    if(!advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '"'))
+    {
+        return false;
+    }
+
+    const __m256i quoteMask = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, _mm256_set1_epi8('"'));
+    unsigned int quoteMaskBits = _mm256_movemask_epi8(quoteMask);
+    if(__popcnt(quoteMaskBits) < 1)
+    {
+        setGltfParserContextError(pParserContext, "Error trying to read object name in line '%s' - couldn't find matching quotes.", pParserContext->pCurrentParsePos->chars);
+        return false;
+    }
+    
+    const __m256i objectName = _mm256_and_si256(pParserContext->pCurrentParsePos->vec, quoteMask);
+    _mm256_store_si256((__m256i*)pObjectNameBuffer, objectName);
+    
+    unsigned long closeQuotesPos = 0;
+    _BitScanForward(&closeQuotesPos, quoteMaskBits);
+
+    if(!advanceGltfParserForCharAmount(pParserContext, closeQuotesPos))~
+    {
+        return false;
+    }
+    return advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, ':');
+}
+
+template<int STRING_COUNT>
+bool areStringsEqual32(const char* pStringA, const char** pStringsB, int* pOutIndex)
+{
+    const __m256i stringA = _mm256_loadu_epi8(pStringA);
+
+    for(int i = 0; i < STRING_COUNT; ++i)
+    {
+        const __m256i stringB = _mm256_loadu_epi8(pStringsB[i]);
+
+        const __m256i compareResult = _mm256_cmpeq_epi8(stringA, stringB);
+        const int compareMask = _mm256_movemask_epi8(compareResult);
+
+        unsigned long lastMatchPos = 0;
+        _BitScanReverse(&lastMatchPos, compareMask);
+
+        if(pStringA[lastMatchPos] == 0)
+        {
+            if(STRING_COUNT != 1)
+            {
+                *pOutIndex = i;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool areStringsEqual32(const char* pStringA, const char* pStringB)
+{
+    return areStringsEqual32<1>(pStringA, &pStringB, nullptr);
+}
+
+parser_state_t mapObjectNameToParserState(const char* pObjectName)
+{
+    const char* pValidNames[] = {
+        "meshes",
+        "materials",
+        "bufferViews",
+        "buffers",
+        "accessors"
+    };
+
+    parser_state_t parserStateToReturnOnMatch[] = {
+        parser_state_t::read_meshes,
+        parser_state_t::read_materials,
+        parser_state_t::read_buffer_views,
+        parser_state_t::read_buffers,
+        parser_state_t::read_accessors
+    };
+    static_assert(ARRAY_SIZE(pValidNames) == ARRAY_SIZE(parserStateToReturnOnMatch));
+
+    int matchingIndex = ~0;
+    if(!areStringsEqual32<ARRAY_SIZE(pValidNames)>(pObjectName, pValidNames, &matchingIndex))
+    {
+        return parser_state_t::skip_object;
+    }
+
+    if(matchingIndex == ~0)
+    {
+        return parser_state_t::read_meshes;
+    }
+
+    return parserStateToReturnOnMatch[matchingIndex];
+}
+
+bool skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char openBracketCharacter, const char closedBracketCharacter)
+{
+    const __m256i openBrackets = _mm256_set1_epi8(openBracketCharacter);
+    const __m256i closeBrackets = _mm256_set1_epi8(closedBracketCharacter);
+
+    uint32_t depth = 1;
+    while(depth > 0)
+    {
+        const __m256i openBracketsCmpResult = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, openBrackets);
+        const __m256i closingBracketsCmpResult = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, closeBrackets);
         uint32_t openingBracketsMask = _mm256_movemask_epi8(openBracketsCmpResult);
         uint32_t closingBracketsMask = _mm256_movemask_epi8(closingBracketsCmpResult);
         uint32_t openingBracketsCount = __popcnt(openingBracketsMask);
         uint32_t closingBracketsCount = __popcnt(closingBracketsMask);
 
-        objectDepth += openingBracketsCount;
-        if(closingBracketsCount > objectDepth)
+        depth += openingBracketsCount;
+        if(closingBracketsCount > depth)
         {
             unsigned long closingBracketIndex = 0;
-            while(closingBracketsCount != objectDepth)
+            while(closingBracketsCount != depth)
             {
                 _BitScanForward(&closingBracketIndex, closingBracketsMask);
                 closingBracketsMask &= ~(1 << closingBracketIndex);
                 --closingBracketsCount;
             }
 
-            if(!skipGltfForCharAmount(pParseContext, closingBracketIndex + 1))
+            if(!advanceGltfParserForCharAmount(pParserContext, closingBracketIndex + 1))
             {
                 return false;
             }
             break;
         }
-        else if(closingBracketsCount == objectDepth)
+        else if(closingBracketsCount == depth)
         {
             unsigned long closingBracketIndex = 0;
             _BitScanReverse(&closingBracketIndex, closingBracketsMask);
             
-            if(!skipGltfForCharAmount(pParseContext, closingBracketIndex + 1))
+            if(!advanceGltfParserForCharAmount(pParserContext, closingBracketIndex + 1))
             {
                 return false;
             }
             break;
         }
 
-        objectDepth -= closingBracketsCount;
-        ++pParseContext->pCurrentParsePos;
+        depth -= closingBracketsCount;
+        advanceGltfParserForCharAmount(pParserContext, 32);
     }
 
     return true;
 }
 
-const uint32_t readGltfObjectCountInArrayWithoutAdvancingParser(gltf_parser_context_t* pParseContext)
+bool skipGltfObject(gltf_parser_context_t* pParserContext)
 {
-    if(pParseContext->pCurrentParsePos->chars[0] != '[')
+    return skipGltfBracketedProperty(pParserContext, '{', '}');
+}
+
+bool skipGltfArray(gltf_parser_context_t* pParserContext)
+{
+    return skipGltfBracketedProperty(pParserContext, '[', ']');
+}
+
+bool skipGltfProperty(gltf_parser_context_t* pParserContext)
+{
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+    const bool isObject = advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '{');
+    if(isObject) 
+    {
+        return skipGltfObject(pParserContext);
+    }
+    
+    const bool isArray = advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '[');
+    if(isArray)
+    {
+        return skipGltfArray(pParserContext);
+    }
+
+    return advanceGltfParserToNextLine(pParserContext);
+}
+
+const uint32_t readGltfObjectCountInArrayWithoutAdvancingParser(gltf_parser_context_t* pParserContext)
+{
+    #if 0
+    if(pParserContext->pCurrentParsePos->chars[0] != '[')
     {
         return 0u;
     }
 
-    const parse_pos_t* pCurrentParsePos = pParseContext->pCurrentParsePos;
+    const parse_pos_t* pCurrentParsePos = pParserContext->pCurrentParsePos;
     
     uint32_t objectCount = 0;
-    if(!skipGltfUntilAfterCharToken(pParseContext, '{'))
+    if(!skipGltfUntilAfterCharToken(pParserContext, '{'))
     {
         return 0;
     }
 
-    pParseContext->pCurrentParsePos = (parse_pos_t*)((char*)pParseContext->pCurrentParsePos - 1);
+    pParserContext->pCurrentParsePos = (parse_pos_t*)((char*)pParserContext->pCurrentParsePos - 1);
     do
     {
-        if(!skipGltfObject(pParseContext))
+        if(!skipGltfObject(pParserContext))
         {
             return 0;
         }
         ++objectCount;  
-    } while(pParseContext->pCurrentParsePos->chars[0] == ',');
+    } while(pParserContext->pCurrentParsePos->chars[0] == ',');
 
-    pParseContext->pCurrentParsePos = pCurrentParsePos;
+    pParserContext->pCurrentParsePos = pCurrentParsePos;
     return objectCount;
+    #else
+
+    return 0;
+    #endif
 }
 
 bool readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* pMemoryAllocator)
@@ -511,14 +641,6 @@ bool readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* p
         return false;
     }
 
-    if(pParserContext->pCurrentParsePos->chars[0] == ' ')
-    {
-        if(!skipGltfUntilAfterCharToken(pParserContext, ' '))
-        {
-            return false;
-        }
-    }
-    
     const uint32_t numMeshes = readGltfObjectCountInArrayWithoutAdvancingParser(pParserContext);
     pParserContext->pGltfDescription->pMeshes = (gltf_mesh_t*)allocateFromAllocator(pMemoryAllocator, sizeof(gltf_mesh_t) * numMeshes);
     pParserContext->pGltfDescription->meshCount = numMeshes;
@@ -537,11 +659,11 @@ bool readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* p
             return false;
         }
 
-        if(strcmp(propertyName, "primitives") != 0)
+        if(areStringsEqual32(propertyName, "primitives"))
         {
 
         }
-        else if(strcmp(propertyName, "name") != 0)
+        else if(areStringsEqual32(propertyName, "name"))
         {
 
         }
@@ -555,6 +677,8 @@ bool readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* p
 
         propertyName[0] = 0;
     }
+
+    return true;
 }
 
 gltf_load_result_t createGltfLoadResultError(const char* pFormat, ...)
@@ -578,10 +702,16 @@ gltf_load_result_t loadGltfDescriptionFromBuffer(gltf_description_t* pOutDescrip
     gltfParserContext.pCurrentParsePos = (parse_pos_t*)pGltfBuffer;
     gltfParserContext.pEndGltfBuffer = pGltfBuffer + gltfBufferSize;
     gltfParserContext.pGltfDescription = (gltf_description_t*)allocateFromAllocator(pMemoryAllocator, sizeof(gltf_description_t), alloc_flags_t::clear_memory);
-
+    gltfParserContext.lineIndex = 0;
+    gltfParserContext.charIndex = 0;
     if(gltfParserContext.pGltfDescription == nullptr)
     {
         return createGltfLoadResultError("Out of memory trying to allocate %d bytes for gltf descriptor", sizeof(gltf_description_t));
+    }
+
+    if(!advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(&gltfParserContext, '{'))
+    {
+        return gltfParserContext.result;
     }
 
     while(gltfParserContext.pCurrentParsePos < gltfParserContext.pEndGltfBuffer)
@@ -622,13 +752,7 @@ gltf_load_result_t loadGltfDescriptionFromBuffer(gltf_description_t* pOutDescrip
         }
     }
 
-    if(gltfParserContext.success == false)
-    {
-        return createGltfLoadResultError(gltfParserContext.errorMessage);
-    }
-
-    //*pOutDescription = gltfParserContext.pGltfDescription;
-    return createGltfLoadResultError("Out of memory trying to allocate %d bytes for gltf descriptor", sizeof(gltf_description_t));
+    return gltfParserContext.result;
 }
 
 bool loadGltfMeshFromMemory(const uint8_t* pGltfBuffer, const uint32_t gltfBufferSizeInBytes, memory_allocator_t* pMemoryAllocator, const char* pGltfBasePath = nullptr)
