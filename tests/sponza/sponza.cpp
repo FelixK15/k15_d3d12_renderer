@@ -177,32 +177,56 @@ bool isAbsoluteFilePath(const char* pFilePath)
     return isalpha(pFilePath[0]) && pFilePath[1] == ':';
 }
 
+enum class gltf_component_type_t
+{
+    BYTE = 0,
+    UNSIGNED_BYTE,
+    SHORT,
+    UNSIGNED_SHORT,
+    UNSIGNED_INT,
+    FLOAT
+};
+
+enum class gltf_type_t
+{
+    SCALAR,
+    VEC2,
+    VEC3,
+    VEC4,
+    MAT2,
+    MAT3,
+    MAT4
+};
+
 struct gltf_accessor_t
 {
-
+    int                     bufferViewIndex;
+    int                     byteOffset;
+    gltf_component_type_t   componentType;
+    int                     count;
+    gltf_type_t             type;
 };
 
 struct gltf_attribute_t
 {
-    char attributeSemantic[15];
-    uint8_t accessorIndex;
+    char*   pAttributeSemantic;
+    int     accessorIndex;
 };
-static_assert(sizeof(gltf_attribute_t) == 16);
 
 struct gltf_primitive_t
 {
     gltf_attribute_t attributes[8];
-    uint32_t attributeCount;
-    uint32_t indices;
-    uint32_t mode;
-    uint32_t materialIndex;
+    int attributeCount;
+    int indices;
+    int mode;
+    int materialIndex;
 };
 
 struct gltf_mesh_t
 {
-    uint32_t            numPrimitives;
+    int                 numPrimitives;
     gltf_primitive_t*   pPrimitives;
-    char                name[64];
+    char*               pName;
 };
 
 struct gltf_material_t
@@ -227,10 +251,10 @@ struct gltf_description_t
     gltf_mesh_t*        pMeshes;
     gltf_buffer_view_t* pBufferViews;
     gltf_buffer_t*      pBuffers;
-    uint32_t            accessorCount;
-    uint32_t            meshCount;
-    uint32_t            materialCount;
-    uint32_t            bufferCount;
+    int                 accessorCount;
+    int                 meshCount;
+    int                 materialCount;
+    int                 bufferCount;
 };
 
 union parse_pos_t
@@ -239,6 +263,8 @@ union parse_pos_t
     char    chars[32];    //for better debugging
 };
 static_assert(sizeof(parse_pos_t::vec) == sizeof(parse_pos_t::chars));
+
+static int gltfObjectTypeStackCapacity = ( sizeof(uint64_t) * 8 ) / 4;
 
 struct gltf_load_result_t
 {
@@ -250,23 +276,45 @@ struct gltf_parser_context_t
 {
     int                 lineIndex;
     int                 charIndex;
+    int                 objectDepth;
+    uint64_t            objectTypeStack;
     gltf_load_result_t  result;
     gltf_description_t* pGltfDescription;
+    memory_allocator_t  memoryAllocator;
     const parse_pos_t*  pCurrentParsePos;
     const void*         pEndGltfBuffer;
 };
 
 enum class parser_state_t
 {
-    read_object_name,
+    read_object,
     eat_leading_whitespaces,
-    skip_object,
+    skip_property,
     read_meshes,
     read_materials,
     read_buffer_views,
     read_buffers,
-    read_accessors
+    read_accessors,
+    finish_parsing
 };
+
+enum class gltf_object_type_t
+{
+    none,
+    object,
+    array,
+    property
+};
+
+bool isNextGltfToken(gltf_parser_context_t* pParserContext, const char token)
+{
+    return pParserContext->pCurrentParsePos->chars[0] == token;
+}
+
+bool isInvalidParserState(gltf_parser_context_t* pParserContext)
+{
+    return pParserContext->result.success == false;
+}
 
 void setGltfParserContextError(gltf_parser_context_t* pParserContext, const char* pFormat, ...)
 {
@@ -285,7 +333,7 @@ void setGltfParserContextError(gltf_parser_context_t* pParserContext, const char
     va_end(vaList);
 }
 
-bool advanceGltfParserForCharAmount(gltf_parser_context_t* pParserContext, const uint32_t numCharsToSkip)
+void advanceGltfParserForCharAmount(gltf_parser_context_t* pParserContext, const uint32_t numCharsToSkip)
 {
     const __m256i newLines = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, _mm256_set1_epi8('\n'));
     const int validCharMask = (1 << numCharsToSkip) - 1;
@@ -308,28 +356,29 @@ bool advanceGltfParserForCharAmount(gltf_parser_context_t* pParserContext, const
     if(pNextParsePos >= pParserContext->pEndGltfBuffer)
     {
         setGltfParserContextError(pParserContext, "Trying to read past gltf buffer - current parse pos: '%s'", pParserContext->pCurrentParsePos->chars);
-        return false;
+        return;
     }
 
     pParserContext->pCurrentParsePos = pNextParsePos;
-    return true;
+    return;
 }
 
-bool advanceGltfParserToTokenAndIgnoreAllOtherTokens(gltf_parser_context_t* pParserContext, const char tokenToFind)
+void advanceGltfParserToTokenAndIgnoreAllOtherTokens(gltf_parser_context_t* pParserContext, const char tokenToFind)
 {
     const __m256i token = _mm256_set1_epi8(tokenToFind);
     while(true)
     {
+        if(isInvalidParserState(pParserContext))
+        {
+            return;
+        }
+        
         const __m256i compareResult = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, token);
         const int tokenMask = _mm256_movemask_epi8(compareResult);
 
         if(tokenMask == 0)
         {
-            if(!advanceGltfParserForCharAmount(pParserContext, 32))
-            {
-                return false;
-            }
-
+            advanceGltfParserForCharAmount(pParserContext, 32);
             continue;
         }
         
@@ -340,19 +389,21 @@ bool advanceGltfParserToTokenAndIgnoreAllOtherTokens(gltf_parser_context_t* pPar
             break;
         }
 
-        if(!advanceGltfParserForCharAmount(pParserContext, tokenPos))
-        {
-            return false;
-        }
+        advanceGltfParserForCharAmount(pParserContext, tokenPos);
     }
-
-    return true;
+    
+    advanceGltfParserForCharAmount(pParserContext, 1);
 }
 
-bool advanceGltfParserAndIgnoreTokens(gltf_parser_context_t* pParserContext, const char* pTokensToIgnore, const int tokenCount)
+void advanceGltfParserAndIgnoreTokens(gltf_parser_context_t* pParserContext, const char* pTokensToIgnore, const int tokenCount)
 {
     while(true)
     {
+        if(isInvalidParserState(pParserContext))
+        {
+            return;
+        }
+
         __m256i filter = _mm256_setzero_si256();
         for(int i = 0; i < tokenCount; ++i)
         {
@@ -362,10 +413,7 @@ bool advanceGltfParserAndIgnoreTokens(gltf_parser_context_t* pParserContext, con
         const unsigned int filterMask = _mm256_movemask_epi8(filter);
         if(filterMask == 0xFFFFFFFF)
         {
-            if(!advanceGltfParserForCharAmount(pParserContext, 32u))
-            {
-                return false;
-            }
+            advanceGltfParserForCharAmount(pParserContext, 32u);
             continue;
         }
         else if(filterMask == 0)
@@ -380,57 +428,65 @@ bool advanceGltfParserAndIgnoreTokens(gltf_parser_context_t* pParserContext, con
             break;
         }
 
-        if(!advanceGltfParserForCharAmount(pParserContext, tokenPos))
-        {
-            return false;
-        }
+        advanceGltfParserForCharAmount(pParserContext, tokenPos);
         break;
     }
-
-    return true;
 }
 
-bool advanceGltfParserToNextNonWhitespaceToken(gltf_parser_context_t* pParserContext)
+void advanceGltfParserToNextNonWhitespaceToken(gltf_parser_context_t* pParserContext)
 {
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
     const char whitespaceTokens[] = {
         ' ', '\n', '\r', '\t'
     };
 
-    return advanceGltfParserAndIgnoreTokens(pParserContext, whitespaceTokens, ARRAY_SIZE(whitespaceTokens));
+    advanceGltfParserAndIgnoreTokens(pParserContext, whitespaceTokens, ARRAY_SIZE(whitespaceTokens));;
 }
 
-bool advanceGltfParserToNextLine(gltf_parser_context_t* pParserContext)
+void advanceGltfParserToNextLine(gltf_parser_context_t* pParserContext)
 {
-    if(!advanceGltfParserToTokenAndIgnoreAllOtherTokens(pParserContext, '\n'))
+    if(isInvalidParserState(pParserContext))
     {
-        return false;
+        return;
     }
 
-    return advanceGltfParserForCharAmount(pParserContext, 1);
+    advanceGltfParserToTokenAndIgnoreAllOtherTokens(pParserContext, '\n');
 }
 
-bool advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(gltf_parser_context_t* pParserContext, const char expectedToken)
+void advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(gltf_parser_context_t* pParserContext, const char expectedToken)
 {
-    if(!advanceGltfParserToNextNonWhitespaceToken(pParserContext))
+    if(isInvalidParserState(pParserContext))
     {
-        return false;
+        return;
     }
+
+    if(isNextGltfToken(pParserContext, expectedToken))
+    {
+        advanceGltfParserForCharAmount(pParserContext, 1);
+        return;
+    }
+
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
 
     const char token = pParserContext->pCurrentParsePos->chars[0];
     if(token != expectedToken)
     {
         setGltfParserContextError(pParserContext, "Unexpected token, read '%c' but expected '%c'", token, expectedToken);
-        return false;
+        return;
     }
 
-    return advanceGltfParserForCharAmount(pParserContext, 1);
+    advanceGltfParserForCharAmount(pParserContext, 1);
 }
 
-bool readGltfObjectName(gltf_parser_context_t* pParserContext, char* pObjectNameBuffer, const uint32_t objectNameBufferLength)
+void readGltfString(gltf_parser_context_t* pParserContext, char** ppOutStringBuffer)
 {
-    if(!advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '"'))
+    if(isInvalidParserState(pParserContext))
     {
-        return false;
+        return;
     }
 
     const __m256i quoteMask = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, _mm256_set1_epi8('"'));
@@ -438,26 +494,30 @@ bool readGltfObjectName(gltf_parser_context_t* pParserContext, char* pObjectName
     if(__popcnt(quoteMaskBits) < 1)
     {
         setGltfParserContextError(pParserContext, "Error trying to read object name in line '%s' - couldn't find matching quotes.", pParserContext->pCurrentParsePos->chars);
-        return false;
+        return;
     }
-    
-    const __m256i objectName = _mm256_and_si256(pParserContext->pCurrentParsePos->vec, quoteMask);
-    _mm256_store_si256((__m256i*)pObjectNameBuffer, objectName);
-    
-    unsigned long closeQuotesPos = 0;
+
+    unsigned long closeQuotesPos= 0;
     _BitScanForward(&closeQuotesPos, quoteMaskBits);
 
-    if(!advanceGltfParserForCharAmount(pParserContext, closeQuotesPos))~
-    {
-        return false;
-    }
-    return advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, ':');
+    char* pStringBuffer = (char*)allocateFromAllocator(&pParserContext->memoryAllocator, 32);
+
+    const __m256i objectName = _mm256_andnot_si256(quoteMask, pParserContext->pCurrentParsePos->vec);
+    _mm256_store_si256((__m256i*)pStringBuffer, objectName);
+    
+    advanceGltfParserForCharAmount(pParserContext, closeQuotesPos+1);
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+
+    *ppOutStringBuffer = pStringBuffer;
 }
 
 template<int STRING_COUNT>
 bool areStringsEqual32(const char* pStringA, const char** pStringsB, int* pOutIndex)
 {
     const __m256i stringA = _mm256_loadu_epi8(pStringA);
+    const int stringMask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(stringA, _mm256_setzero_si256()));
+    unsigned long stringLength = 0;
+    _BitScanForward(&stringLength, stringMask);
 
     for(int i = 0; i < STRING_COUNT; ++i)
     {
@@ -465,11 +525,10 @@ bool areStringsEqual32(const char* pStringA, const char** pStringsB, int* pOutIn
 
         const __m256i compareResult = _mm256_cmpeq_epi8(stringA, stringB);
         const int compareMask = _mm256_movemask_epi8(compareResult);
+        const int validBitsMask = (1 << stringLength) - 1;
+        const int matchingChars = __popcnt(compareMask & validBitsMask);
 
-        unsigned long lastMatchPos = 0;
-        _BitScanReverse(&lastMatchPos, compareMask);
-
-        if(pStringA[lastMatchPos] == 0)
+        if(matchingChars == stringLength)
         {
             if(STRING_COUNT != 1)
             {
@@ -509,18 +568,13 @@ parser_state_t mapObjectNameToParserState(const char* pObjectName)
     int matchingIndex = ~0;
     if(!areStringsEqual32<ARRAY_SIZE(pValidNames)>(pObjectName, pValidNames, &matchingIndex))
     {
-        return parser_state_t::skip_object;
-    }
-
-    if(matchingIndex == ~0)
-    {
-        return parser_state_t::read_meshes;
+        return parser_state_t::skip_property;
     }
 
     return parserStateToReturnOnMatch[matchingIndex];
 }
 
-bool skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char openBracketCharacter, const char closedBracketCharacter)
+void skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char openBracketCharacter, const char closedBracketCharacter)
 {
     const __m256i openBrackets = _mm256_set1_epi8(openBracketCharacter);
     const __m256i closeBrackets = _mm256_set1_epi8(closedBracketCharacter);
@@ -528,6 +582,11 @@ bool skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char
     uint32_t depth = 1;
     while(depth > 0)
     {
+        if(isInvalidParserState(pParserContext))
+        {
+            return;
+        }
+
         const __m256i openBracketsCmpResult = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, openBrackets);
         const __m256i closingBracketsCmpResult = _mm256_cmpeq_epi8(pParserContext->pCurrentParsePos->vec, closeBrackets);
         uint32_t openingBracketsMask = _mm256_movemask_epi8(openBracketsCmpResult);
@@ -546,10 +605,7 @@ bool skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char
                 --closingBracketsCount;
             }
 
-            if(!advanceGltfParserForCharAmount(pParserContext, closingBracketIndex + 1))
-            {
-                return false;
-            }
+            advanceGltfParserForCharAmount(pParserContext, closingBracketIndex + 1);
             break;
         }
         else if(closingBracketsCount == depth)
@@ -557,10 +613,7 @@ bool skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char
             unsigned long closingBracketIndex = 0;
             _BitScanReverse(&closingBracketIndex, closingBracketsMask);
             
-            if(!advanceGltfParserForCharAmount(pParserContext, closingBracketIndex + 1))
-            {
-                return false;
-            }
+            advanceGltfParserForCharAmount(pParserContext, closingBracketIndex + 1);
             break;
         }
 
@@ -568,117 +621,507 @@ bool skipGltfBracketedProperty(gltf_parser_context_t* pParserContext, const char
         advanceGltfParserForCharAmount(pParserContext, 32);
     }
 
-    return true;
+    return;
 }
 
-bool skipGltfObject(gltf_parser_context_t* pParserContext)
+void pushGltfObjectTypeToObjectTypeStack(gltf_parser_context_t* pParserContext, const gltf_object_type_t objectType)
 {
-    return skipGltfBracketedProperty(pParserContext, '{', '}');
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
+    if(pParserContext->objectDepth >= gltfObjectTypeStackCapacity)
+    {
+        setGltfParserContextError(pParserContext, "Internal gtlf object type stack overflow");
+        return;
+    }
+
+    const uint64_t objectDepth = (uint64_t)pParserContext->objectDepth;
+    const uint64_t shift = 2 * objectDepth;
+    pParserContext->objectTypeStack |= ((uint64_t)objectType << shift);
+    ++pParserContext->objectDepth;
 }
 
-bool skipGltfArray(gltf_parser_context_t* pParserContext)
+gltf_object_type_t popGltfObjectTypeFromObjectTypeStack(gltf_parser_context_t* pParserContext)
 {
-    return skipGltfBracketedProperty(pParserContext, '[', ']');
+    if(isInvalidParserState(pParserContext))
+    {
+        return gltf_object_type_t::none;
+    }
+
+    if(pParserContext->objectDepth == 0)
+    {
+        setGltfParserContextError(pParserContext, "Internal gtlf object type stack underflow");
+        return gltf_object_type_t::none;
+    }
+
+    --pParserContext->objectDepth;
+    const uint64_t objectDepth = pParserContext->objectDepth;
+    const uint64_t shift = 2 * objectDepth;
+    const uint64_t validValueMask = ( 1ull << ( 2ull * pParserContext->objectDepth ) ) - 1ull;
+    const gltf_object_type_t ojectType = ( gltf_object_type_t )( ( pParserContext->objectTypeStack >> shift ) & 0x3ull );
+    pParserContext->objectTypeStack &= validValueMask;
+    return ojectType;
 }
 
-bool skipGltfProperty(gltf_parser_context_t* pParserContext)
+gltf_object_type_t getTypeOfCurrentGltfObject(gltf_parser_context_t* pParserContext)
 {
+    if(isInvalidParserState(pParserContext))
+    {
+        return gltf_object_type_t::none;
+    }
+
+    if(pParserContext->objectDepth == 0)
+    {
+        setGltfParserContextError(pParserContext, "Internal gtlf object type stack underflow");
+        return gltf_object_type_t::none;
+    }
+
+    const uint64_t objectDepth = pParserContext->objectDepth - 1;
+    const uint64_t shift = 1ull << objectDepth;
+    return (gltf_object_type_t)(( pParserContext->objectTypeStack >> shift ) & 0x3ull);
+}
+
+void openGltfObject(gltf_parser_context_t* pParserContext)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
     advanceGltfParserToNextNonWhitespaceToken(pParserContext);
-    const bool isObject = advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '{');
-    if(isObject) 
+    if(isNextGltfToken(pParserContext, ','))
     {
-        return skipGltfObject(pParserContext);
-    }
-    
-    const bool isArray = advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '[');
-    if(isArray)
-    {
-        return skipGltfArray(pParserContext);
+        advanceGltfParserForCharAmount(pParserContext, 1);
+        advanceGltfParserToNextNonWhitespaceToken(pParserContext);
     }
 
-    return advanceGltfParserToNextLine(pParserContext);
+    gltf_object_type_t objectType = gltf_object_type_t::none;
+    if(isNextGltfToken(pParserContext, '{'))
+    {
+        objectType = gltf_object_type_t::object;
+    }
+    else if(isNextGltfToken(pParserContext, '['))
+    {
+        objectType = gltf_object_type_t::array;
+    }
+    else
+    {
+        objectType = gltf_object_type_t::property;
+    }
+
+    pushGltfObjectTypeToObjectTypeStack(pParserContext, objectType);
+    advanceGltfParserForCharAmount(pParserContext, 1);
 }
 
-const uint32_t readGltfObjectCountInArrayWithoutAdvancingParser(gltf_parser_context_t* pParserContext)
+void openGltfObject(gltf_parser_context_t* pParserContext, char** pOutObjectName)
 {
-    #if 0
-    if(pParserContext->pCurrentParsePos->chars[0] != '[')
+    if(isInvalidParserState(pParserContext))
     {
-        return 0u;
+        return;
     }
 
-    const parse_pos_t* pCurrentParsePos = pParserContext->pCurrentParsePos;
-    
-    uint32_t objectCount = 0;
-    if(!skipGltfUntilAfterCharToken(pParserContext, '{'))
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+    if(isNextGltfToken(pParserContext, ','))
     {
-        return 0;
+        advanceGltfParserForCharAmount(pParserContext, 1);
     }
 
-    pParserContext->pCurrentParsePos = (parse_pos_t*)((char*)pParserContext->pCurrentParsePos - 1);
-    do
+    advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, '"');
+    readGltfString(pParserContext, pOutObjectName);
+    advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(pParserContext, ':');
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+
+    gltf_object_type_t objectType = gltf_object_type_t::none;
+    if(isNextGltfToken(pParserContext, '{'))
     {
-        if(!skipGltfObject(pParserContext))
-        {
-            return 0;
-        }
-        ++objectCount;  
-    } while(pParserContext->pCurrentParsePos->chars[0] == ',');
+        objectType = gltf_object_type_t::object;
+    }
+    else if(isNextGltfToken(pParserContext, '['))
+    {
+        objectType = gltf_object_type_t::array;
+    }
+    else
+    {
+        objectType = gltf_object_type_t::property;
+    }
 
-    pParserContext->pCurrentParsePos = pCurrentParsePos;
-    return objectCount;
-    #else
-
-    return 0;
-    #endif
+    pushGltfObjectTypeToObjectTypeStack(pParserContext, objectType);
+    advanceGltfParserForCharAmount(pParserContext, 1);
 }
 
-bool readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* pMemoryAllocator)
+void closeGltfObject(gltf_parser_context_t* pParserContext)
 {
-    if(pParserContext->pGltfDescription->meshCount > 0)
+    if(isInvalidParserState(pParserContext))
     {
-        setGltfParserContextError(pParserContext, "Multiple 'meshes' objects in gltf file.");
+        return;
+    }
+
+    gltf_object_type_t objectType = popGltfObjectTypeFromObjectTypeStack(pParserContext);
+    if(objectType == gltf_object_type_t::none)
+    {
+        setGltfParserContextError(pParserContext, "Mismatch of openGltfObject/closeGltfObject calls");
+        return;
+    }
+
+    if(objectType == gltf_object_type_t::object)
+    {
+        skipGltfBracketedProperty(pParserContext, '{', '}');
+    }
+    else if(objectType == gltf_object_type_t::array)
+    {
+        skipGltfBracketedProperty(pParserContext, '[', ']');
+    }
+    else if(objectType == gltf_object_type_t::property)
+    {
+        advanceGltfParserToNextLine(pParserContext);
+    }
+
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+}
+
+bool hasMoreObjectsInGltfArray(gltf_parser_context_t* pParserContext)
+{
+    if(isInvalidParserState(pParserContext))
+    {
         return false;
     }
 
-    const uint32_t numMeshes = readGltfObjectCountInArrayWithoutAdvancingParser(pParserContext);
-    pParserContext->pGltfDescription->pMeshes = (gltf_mesh_t*)allocateFromAllocator(pMemoryAllocator, sizeof(gltf_mesh_t) * numMeshes);
-    pParserContext->pGltfDescription->meshCount = numMeshes;
+    gltf_object_type_t objectType = getTypeOfCurrentGltfObject(pParserContext);
+    if(objectType != gltf_object_type_t::array)
+    {
+        setGltfParserContextError(pParserContext, "Called 'hasMoreObjectsInGltfArray' but current object is not an array");
+        return false;
+    }
 
-    char propertyName[64] = {};
-    uint32_t meshIndex = 0;
+    return isNextGltfToken(pParserContext, ',');
+}
+
+bool hasMoreMembersInGltfObject(gltf_parser_context_t* pParserContext)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return false;
+    }
+
+    gltf_object_type_t objectType = getTypeOfCurrentGltfObject(pParserContext);
+    if(objectType != gltf_object_type_t::object)
+    {
+        setGltfParserContextError(pParserContext, "Called 'hasMoreMembersInGltfObject' but current object is not an array");
+        return false;
+    }
+
+    return isNextGltfToken(pParserContext, ',');
+}
+
+void readGltfObjectCountInArrayWithoutAdvancingParser(gltf_parser_context_t* pParserContext, int* pOutObjectCount)
+{
+    if(getTypeOfCurrentGltfObject(pParserContext) != gltf_object_type_t::array)
+    {
+        setGltfParserContextError(pParserContext, "Called 'readGltfObjectCountInArrayWithoutAdvancingParser()' for non array object");
+        return;
+    }
+
+    const parse_pos_t* pCurrentParsePos = pParserContext->pCurrentParsePos;
+    int objectCount = 0;
     while(true)
     {
-        if(meshIndex == numMeshes)
+        openGltfObject(pParserContext);
+        closeGltfObject(pParserContext);
+        ++objectCount;
+
+        if(!isNextGltfToken(pParserContext, ','))
+        {
+            break;
+        }
+        
+        advanceGltfParserForCharAmount(pParserContext, 1);
+    }
+
+    pParserContext->pCurrentParsePos = pCurrentParsePos;
+    *pOutObjectCount = objectCount;
+    return;
+}
+
+void readGltfInteger(gltf_parser_context_t* pParserContext, int* pOutInteger)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
+    static const __m128i numberMaskLut[] = {
+        _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x000000FF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x0000FFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x00FFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0xFFFFFFFF),
+        _mm_set_epi32(0x00000000, 0x00000000, 0x000000FF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x0000FFFF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00FFFFFF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0xFFFFFFFF, 0xFFFFFFFF)
+    };
+
+    static const __m256i numberExtendLut[] = {
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 1), 
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 1, 10), 
+        _mm256_set_epi32(0, 0, 0, 0, 0, 1, 10, 100),
+        _mm256_set_epi32(0, 0, 0, 0, 1, 10, 100, 1000), 
+        _mm256_set_epi32(0, 0, 0, 1, 10, 100, 1000, 10000),
+        _mm256_set_epi32(0, 0, 1, 10, 100, 1000, 10000, 100000),
+        _mm256_set_epi32(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
+        _mm256_set_epi32(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000),
+    };
+
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+
+    const bool isNegative = isNextGltfToken(pParserContext, '-');
+    if(isNegative)
+    {
+        advanceGltfParserForCharAmount(pParserContext, 1);
+    }
+
+    __m128i numbers = _mm256_castsi256_si128(pParserContext->pCurrentParsePos->vec);
+    numbers = _mm_sub_epi8(numbers, _mm_set1_epi8('0'));
+    __m128i numMask = _mm_cmpgt_epi8(numbers, _mm_set1_epi8(-1));
+    int numberMask = _mm_movemask_epi8(numMask);
+    unsigned long lastDigitIndex = 0;
+    _BitScanForward(&lastDigitIndex, ~numberMask);
+    
+    if(lastDigitIndex >= 8)
+    {
+        setGltfParserContextError(pParserContext, "Number '%s' is too long", pParserContext->pCurrentParsePos->chars);
+        return;
+    }
+    
+    numMask = _mm_and_si128(numMask, numberMaskLut[lastDigitIndex-1]);
+    __m128i sparseInteger = _mm_and_si128(numMask, numbers);
+    __m256i spraseInteger256 = _mm256_cvtepu8_epi32(sparseInteger);
+    spraseInteger256 = _mm256_mullo_epi32(spraseInteger256, numberExtendLut[lastDigitIndex-1]);
+    spraseInteger256 = _mm256_hadd_epi32(spraseInteger256, _mm256_setzero_si256());
+    spraseInteger256 = _mm256_hadd_epi32(spraseInteger256, _mm256_setzero_si256());
+    
+    advanceGltfParserForCharAmount(pParserContext, lastDigitIndex);
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+
+    *pOutInteger = _mm256_extract_epi32(spraseInteger256, 0u) + _mm256_extract_epi32(spraseInteger256, 4u);
+    return;
+}
+
+void readGltfMeshPrimitiveAttributes(gltf_parser_context_t* pParserContext, gltf_primitive_t* pPrimitive)
+{
+    int attributeIndex = 0;
+
+    while(true)
+    {
+        if(isInvalidParserState(pParserContext))
+        {
+            return;
+        }
+
+        openGltfObject(pParserContext, &pPrimitive->attributes[attributeIndex].pAttributeSemantic);
+            readGltfInteger(pParserContext, &pPrimitive->attributes[attributeIndex].accessorIndex);
+        closeGltfObject(pParserContext);
+
+        if(!hasMoreMembersInGltfObject(pParserContext))
+        {
+            break;
+        }
+        ++attributeIndex;
+    }
+
+    pPrimitive->attributeCount = attributeIndex;
+    return;
+}
+
+void readGltfMeshPrimitive(gltf_parser_context_t* pParserContext, gltf_primitive_t* pPrimitive)
+{
+    const char* validPrimitivePropertyNames[] = {
+        "attributes",
+        "indices",
+        "mode",
+        "material"
+    };
+
+    const int attributePropertyIndex = 0;
+    const int indicesPropertyIndex = 1;
+    const int modePropertyIndex = 2;
+    const int materialPropertyIndex = 3;
+
+    while(true)
+    {
+        if(isInvalidParserState(pParserContext))
+        {
+            return;
+        }
+
+        char* pObjectName = nullptr;
+        openGltfObject(pParserContext, &pObjectName);
+
+        int propertyIndex = 0;
+        if(areStringsEqual32<4>(pObjectName, validPrimitivePropertyNames, &propertyIndex))
+        {
+            switch(propertyIndex)
+            {
+                case indicesPropertyIndex:
+                    readGltfInteger(pParserContext, &pPrimitive->indices);
+                    break;
+
+                case modePropertyIndex:
+                    readGltfInteger(pParserContext, &pPrimitive->mode);
+                    break;
+
+                case materialPropertyIndex:
+                    readGltfInteger(pParserContext, &pPrimitive->materialIndex);
+                    break;
+                
+                case attributePropertyIndex:
+                    readGltfMeshPrimitiveAttributes(pParserContext, pPrimitive);
+                    break;
+            }
+        }
+
+        closeGltfObject(pParserContext);
+    }
+    return;
+}
+
+void readGltfMeshPrimitives(gltf_parser_context_t* pParserContext, gltf_mesh_t* pMesh, memory_allocator_t* pMemoryAllocator)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
+    int numPrimitives = 0;
+    readGltfObjectCountInArrayWithoutAdvancingParser(pParserContext, &numPrimitives);
+
+    gltf_primitive_t* pPrimitives = (gltf_primitive_t*)allocateFromAllocator(&pParserContext->memoryAllocator, sizeof(gltf_primitive_t) * numPrimitives);
+    if(pPrimitives == nullptr)
+    {
+        setGltfParserContextError(pParserContext, "Couldn't allocate memory for %u primitives", numPrimitives);
+        return;
+    }
+
+    pMesh->pPrimitives = pPrimitives;
+    pMesh->numPrimitives = numPrimitives;
+
+    int primitiveIndex = 0;
+    while(true)
+    {
+        openGltfObject(pParserContext);
+            readGltfMeshPrimitive(pParserContext, pPrimitives + primitiveIndex);
+        closeGltfObject(pParserContext);
+
+        if(!hasMoreObjectsInGltfArray(pParserContext))
         {
             break;
         }
 
-        if(!readGltfObjectName(pParserContext, propertyName, sizeof(propertyName)))
+        ++primitiveIndex;
+    };
+    
+    return;
+}
+
+void readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* pMemoryAllocator)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
+    if(pParserContext->pGltfDescription->meshCount > 0)
+    {
+        setGltfParserContextError(pParserContext, "Multiple 'meshes' objects in gltf file.");
+        return;
+    }
+
+    int numMeshes = 0;
+    readGltfObjectCountInArrayWithoutAdvancingParser(pParserContext, &numMeshes);
+
+    gltf_mesh_t* pMeshes = (gltf_mesh_t*)allocateFromAllocator(&pParserContext->memoryAllocator, sizeof(gltf_mesh_t) * numMeshes);
+    if(pMeshes == nullptr)
+    {
+        setGltfParserContextError(pParserContext, "Couldn't allocate memory for %u meshes", numMeshes);
+        return;
+    }
+
+    pParserContext->pGltfDescription->pMeshes = pMeshes;
+    pParserContext->pGltfDescription->meshCount = numMeshes;
+
+    const char* validMeshPropertyNames[] = {
+        "primitives",
+        "name"
+    };
+
+    const int meshPrimitivesIndex = 0;
+    const int meshNameIndex = 1;
+    int meshIndex = 0;
+    while(true)
+    {
+        if(isInvalidParserState(pParserContext))
         {
-            return false;
+            return;
         }
 
-        if(areStringsEqual32(propertyName, "primitives"))
-        {
+        char* pObjectName = nullptr;
+        openGltfObject(pParserContext, &pObjectName);
 
-        }
-        else if(areStringsEqual32(propertyName, "name"))
+        int propertyIndex = ~0;
+        if(areStringsEqual32<2>(pObjectName, validMeshPropertyNames, &propertyIndex))
         {
-
-        }
-        else
-        {
-            if(!skipGltfObject(pParserContext))
+            if(propertyIndex == meshPrimitivesIndex)
             {
-                return false;
+                readGltfMeshPrimitives(pParserContext, pMeshes, pMemoryAllocator);
+            }
+            else if(propertyIndex == meshNameIndex)
+            {
+                readGltfString(pParserContext, &pMeshes[meshIndex].pName);
             }
         }
 
-        propertyName[0] = 0;
+        closeGltfObject(pParserContext);
+
+        if(!hasMoreObjectsInGltfArray(pParserContext))
+        {
+            break;
+        }
+
+        ++meshIndex;
+    }
+    return;
+}
+
+void readGltfAccessors(gltf_parser_context_t* pParserContext, memory_allocator_t* pMemoryAllocator)
+{
+    if(pParserContext->result.success == false)
+    {
+        return;
     }
 
-    return true;
+    if(pParserContext->pGltfDescription->accessorCount > 0)
+    {
+        setGltfParserContextError(pParserContext, "Multiple 'accessor' objects in gltf file.");
+        return;
+    }
+
+    int numAccessors = 0;
+    readGltfObjectCountInArrayWithoutAdvancingParser(pParserContext, &numAccessors);
+
+    gltf_accessor_t* pAccessors = (gltf_accessor_t*)allocateFromAllocator(pMemoryAllocator, sizeof(gltf_accessor_t) * numAccessors);
+    if(pAccessors == nullptr)
+    {
+        setGltfParserContextError(pParserContext, "Couldn't allocate memory for %d accessors", numAccessors);
+        return;
+    }
+
+    pParserContext->pGltfDescription->pAccessors = pAccessors;
+    pParserContext->pGltfDescription->accessorCount = numAccessors;
+
+    while(true)
+    {
+        if(pParserContext->result.success == false)
+        {
+            return;
+        }
+    }
+
+    return;
 }
 
 gltf_load_result_t createGltfLoadResultError(const char* pFormat, ...)
@@ -694,61 +1137,73 @@ gltf_load_result_t createGltfLoadResultError(const char* pFormat, ...)
     return result;
 }
 
-gltf_load_result_t loadGltfDescriptionFromBuffer(gltf_description_t* pOutDescription, const uint8_t* pGltfBuffer, const uint32_t gltfBufferSize, memory_allocator_t* pMemoryAllocator)
+void createGltfParserContext(gltf_parser_context_t* pOutContext, const void* pGltfBuffer, const uint32_t gltfBufferSizeInBytes, void* pParserTemporaryMemory, const uint32_t parserTemporaryMemorySizeInBytes)
 {
-    parser_state_t parserState = parser_state_t::read_object_name;
-
     gltf_parser_context_t gltfParserContext = {};
+    createStackMemoryAllocator(&gltfParserContext.memoryAllocator, parserTemporaryMemorySizeInBytes, pParserTemporaryMemory);
+
     gltfParserContext.pCurrentParsePos = (parse_pos_t*)pGltfBuffer;
-    gltfParserContext.pEndGltfBuffer = pGltfBuffer + gltfBufferSize;
-    gltfParserContext.pGltfDescription = (gltf_description_t*)allocateFromAllocator(pMemoryAllocator, sizeof(gltf_description_t), alloc_flags_t::clear_memory);
+    gltfParserContext.pEndGltfBuffer = (char*)pGltfBuffer + gltfBufferSizeInBytes;
+    gltfParserContext.pGltfDescription = (gltf_description_t*)allocateFromAllocator(&gltfParserContext.memoryAllocator, sizeof(gltf_description_t), alloc_flags_t::clear_memory);
     gltfParserContext.lineIndex = 0;
     gltfParserContext.charIndex = 0;
+    gltfParserContext.result.success = true;
+
+    *pOutContext = gltfParserContext;
+}
+
+gltf_load_result_t loadGltfDescriptionFromBuffer(gltf_description_t* pOutDescription, const uint8_t* pGltfBuffer, const uint32_t gltfBufferSize, memory_allocator_t* pMemoryAllocator)
+{
+    parser_state_t parserState = parser_state_t::read_object;
+
+    const uint32_t parserTempMemorySizeInBytes = 1024*1024*1024;
+    void* pParserTempMemory = allocateFromAllocator(pMemoryAllocator, parserTempMemorySizeInBytes, alloc_flags_t::clear_memory);
+
+    gltf_parser_context_t gltfParserContext = {};
+    createGltfParserContext(&gltfParserContext, pGltfBuffer, gltfBufferSize, pParserTempMemory, parserTempMemorySizeInBytes);
     if(gltfParserContext.pGltfDescription == nullptr)
     {
         return createGltfLoadResultError("Out of memory trying to allocate %d bytes for gltf descriptor", sizeof(gltf_description_t));
     }
 
-    if(!advanceGltfParserToExpectedTokenAndIgnoreWhitespaces(&gltfParserContext, '{'))
+    openGltfObject(&gltfParserContext);
+    while(true)
     {
-        return gltfParserContext.result;
-    }
+        if(parserState == parser_state_t::finish_parsing)
+        {
+            break;
+        }
 
-    while(gltfParserContext.pCurrentParsePos < gltfParserContext.pEndGltfBuffer)
-    {
         switch(parserState)
         {
-            case parser_state_t::read_object_name:
+            case parser_state_t::read_object:
             {
-                char objectName[64] = {};
-                if(!readGltfObjectName(&gltfParserContext, objectName, sizeof(objectName)))
-                {
-                    break;
-                }
-                parserState = mapObjectNameToParserState(objectName);
+                char* pObjectName = nullptr;
+                openGltfObject(&gltfParserContext, &pObjectName);
+                parserState = mapObjectNameToParserState(pObjectName);
                 break;
             }
 
-            case parser_state_t::skip_object:
+            case parser_state_t::skip_property:
             {
-                if(!skipGltfObject(&gltfParserContext))
-                {
-                    break;
-                }
-                parserState = parser_state_t::read_object_name;
+                closeGltfObject(&gltfParserContext);
+                parserState = parser_state_t::read_object;
                 break;
             }
 
-            case parser_state_t::read_meshes:
+             case parser_state_t::read_meshes:
             {
-                if(!readGltfMeshes(&gltfParserContext, pMemoryAllocator))
-                {
-                    break;
-                }
-                parserState = parser_state_t::eat_leading_whitespaces;
+                readGltfMeshes(&gltfParserContext, pMemoryAllocator);
+                parserState = parser_state_t::read_object;
                 break;
             }
 
+            case parser_state_t::read_accessors:
+            {
+                readGltfAccessors(&gltfParserContext, pMemoryAllocator);
+                parserState = parser_state_t::read_object;
+                break;
+            }
         }
     }
 
