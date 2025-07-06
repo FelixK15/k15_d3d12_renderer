@@ -577,15 +577,92 @@ void readGltfString(gltf_parser_context_t* pParserContext, char** ppOutStringBuf
     }
 }
 
-template<int STRING_COUNT>
-bool areStringsEqual32(const char* pStringA, const char** pStringsB, int* pOutIndex)
+void readGltfInteger(gltf_parser_context_t* pParserContext, int* pOutInteger)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
+    static const __m128i numberMaskLut[] = {
+        _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x000000FF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x0000FFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x00FFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0xFFFFFFFF),
+        _mm_set_epi32(0x00000000, 0x00000000, 0x000000FF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x0000FFFF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00FFFFFF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0xFFFFFFFF, 0xFFFFFFFF)
+    };
+
+    static const __m256i numberExtendLut[] = {
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 1), 
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 1, 10), 
+        _mm256_set_epi32(0, 0, 0, 0, 0, 1, 10, 100),
+        _mm256_set_epi32(0, 0, 0, 0, 1, 10, 100, 1000), 
+        _mm256_set_epi32(0, 0, 0, 1, 10, 100, 1000, 10000),
+        _mm256_set_epi32(0, 0, 1, 10, 100, 1000, 10000, 100000),
+        _mm256_set_epi32(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
+        _mm256_set_epi32(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000),
+    };
+
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+
+    const bool isNegative = isNextGltfToken(pParserContext, '-');
+    if(isNegative)
+    {
+        advanceGltfParserForCharAmount(pParserContext, 1);
+    }
+
+    __m128i numbers = _mm256_castsi256_si128(pParserContext->pCurrentParsePos->vec);
+    numbers = _mm_sub_epi8(numbers, _mm_set1_epi8('0'));
+    __m128i numMask = _mm_cmpgt_epi8(numbers, _mm_set1_epi8(-1));
+    int numberMask = _mm_movemask_epi8(numMask);
+    unsigned long lastDigitIndex = 0;
+    _BitScanForward(&lastDigitIndex, ~numberMask);
+    
+    if(lastDigitIndex >= 8)
+    {
+        setGltfParserContextError(pParserContext, "Number '%s' is too long", pParserContext->pCurrentParsePos->chars);
+        return;
+    }
+    
+    numMask = _mm_and_si128(numMask, numberMaskLut[lastDigitIndex-1]);
+    __m128i sparseInteger = _mm_and_si128(numMask, numbers);
+    __m256i spraseInteger256 = _mm256_cvtepu8_epi32(sparseInteger);
+    spraseInteger256 = _mm256_mullo_epi32(spraseInteger256, numberExtendLut[lastDigitIndex-1]);
+    spraseInteger256 = _mm256_hadd_epi32(spraseInteger256, _mm256_setzero_si256());
+    spraseInteger256 = _mm256_hadd_epi32(spraseInteger256, _mm256_setzero_si256());
+    
+    advanceGltfParserForCharAmount(pParserContext, lastDigitIndex);
+    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
+
+    *pOutInteger = _mm256_extract_epi32(spraseInteger256, 0u) + _mm256_extract_epi32(spraseInteger256, 4u);
+    return;
+}
+
+void readGltfDouble(gltf_parser_context_t* pParserContext, double* pOutDouble)
+{
+    if(isInvalidParserState(pParserContext))
+    {
+        return;
+    }
+
+    int integerPart;
+    readGltfInteger(pParserContext, &integerPart);
+
+    if(!isNextGltfToken(pParserContext, '.'))
+    {
+        *pOutDouble = (double)integerPart;
+        return;
+    }
+
+    advanceGltfParserForCharAmount(pParserContext, 1);
+    
+}
+
+bool areStringsEqual32(const char* pStringA, const char** pStringsB, const int stringCount, int* pOutIndex)
 {
     const __m256i stringA = _mm256_loadu_epi8(pStringA);
     const int stringMask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(stringA, _mm256_setzero_si256()));
     unsigned long stringLength = 0;
     _BitScanForward(&stringLength, stringMask);
 
-    for(int i = 0; i < STRING_COUNT; ++i)
+    for(int i = 0; i < stringCount; ++i)
     {
         const __m256i stringB = _mm256_loadu_epi8(pStringsB[i]);
 
@@ -596,20 +673,12 @@ bool areStringsEqual32(const char* pStringA, const char** pStringsB, int* pOutIn
 
         if(matchingChars == stringLength)
         {
-            if(STRING_COUNT != 1)
-            {
-                *pOutIndex = i;
-            }
+            *pOutIndex = i;
             return true;
         }
     }
 
     return false;
-}
-
-bool areStringsEqual32(const char* pStringA, const char* pStringB)
-{
-    return areStringsEqual32<1>(pStringA, &pStringB, nullptr);
 }
 
 parser_state_t mapObjectNameToParserState(const char* pObjectName)
@@ -632,7 +701,7 @@ parser_state_t mapObjectNameToParserState(const char* pObjectName)
     static_assert(ARRAY_SIZE(pValidNames) == ARRAY_SIZE(parserStateToReturnOnMatch));
 
     int matchingIndex = ~0;
-    if(!areStringsEqual32<ARRAY_SIZE(pValidNames)>(pObjectName, pValidNames, &matchingIndex))
+    if(!areStringsEqual32(pObjectName, pValidNames, ARRAY_SIZE(pValidNames), &matchingIndex))
     {
         return parser_state_t::skip_property;
     }
@@ -931,64 +1000,6 @@ void readGltfObjectCountInArrayWithoutAdvancingParser(gltf_parser_context_t* pPa
     return;
 }
 
-void readGltfInteger(gltf_parser_context_t* pParserContext, int* pOutInteger)
-{
-    if(isInvalidParserState(pParserContext))
-    {
-        return;
-    }
-
-    static const __m128i numberMaskLut[] = {
-        _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x000000FF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x0000FFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0x00FFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00000000, 0xFFFFFFFF),
-        _mm_set_epi32(0x00000000, 0x00000000, 0x000000FF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x0000FFFF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0x00FFFFFF, 0xFFFFFFFF), _mm_set_epi32(0x00000000, 0x00000000, 0xFFFFFFFF, 0xFFFFFFFF)
-    };
-
-    static const __m256i numberExtendLut[] = {
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 1), 
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 1, 10), 
-        _mm256_set_epi32(0, 0, 0, 0, 0, 1, 10, 100),
-        _mm256_set_epi32(0, 0, 0, 0, 1, 10, 100, 1000), 
-        _mm256_set_epi32(0, 0, 0, 1, 10, 100, 1000, 10000),
-        _mm256_set_epi32(0, 0, 1, 10, 100, 1000, 10000, 100000),
-        _mm256_set_epi32(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
-        _mm256_set_epi32(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000),
-    };
-
-    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
-
-    const bool isNegative = isNextGltfToken(pParserContext, '-');
-    if(isNegative)
-    {
-        advanceGltfParserForCharAmount(pParserContext, 1);
-    }
-
-    __m128i numbers = _mm256_castsi256_si128(pParserContext->pCurrentParsePos->vec);
-    numbers = _mm_sub_epi8(numbers, _mm_set1_epi8('0'));
-    __m128i numMask = _mm_cmpgt_epi8(numbers, _mm_set1_epi8(-1));
-    int numberMask = _mm_movemask_epi8(numMask);
-    unsigned long lastDigitIndex = 0;
-    _BitScanForward(&lastDigitIndex, ~numberMask);
-    
-    if(lastDigitIndex >= 8)
-    {
-        setGltfParserContextError(pParserContext, "Number '%s' is too long", pParserContext->pCurrentParsePos->chars);
-        return;
-    }
-    
-    numMask = _mm_and_si128(numMask, numberMaskLut[lastDigitIndex-1]);
-    __m128i sparseInteger = _mm_and_si128(numMask, numbers);
-    __m256i spraseInteger256 = _mm256_cvtepu8_epi32(sparseInteger);
-    spraseInteger256 = _mm256_mullo_epi32(spraseInteger256, numberExtendLut[lastDigitIndex-1]);
-    spraseInteger256 = _mm256_hadd_epi32(spraseInteger256, _mm256_setzero_si256());
-    spraseInteger256 = _mm256_hadd_epi32(spraseInteger256, _mm256_setzero_si256());
-    
-    advanceGltfParserForCharAmount(pParserContext, lastDigitIndex);
-    advanceGltfParserToNextNonWhitespaceToken(pParserContext);
-
-    *pOutInteger = _mm256_extract_epi32(spraseInteger256, 0u) + _mm256_extract_epi32(spraseInteger256, 4u);
-    return;
-}
-
 void readGltfMeshPrimitiveAttributes(gltf_parser_context_t* pParserContext, gltf_primitive_t* pPrimitive)
 {
     int attributeIndex = 0;
@@ -1040,7 +1051,7 @@ void readGltfMeshPrimitive(gltf_parser_context_t* pParserContext, gltf_primitive
         openGltfObject(pParserContext, &pObjectName);
 
         int propertyIndex = 0;
-        if(areStringsEqual32<4>(pObjectName, validPrimitivePropertyNames, &propertyIndex))
+        if(areStringsEqual32(pObjectName, validPrimitivePropertyNames, ARRAY_SIZE(validPrimitivePropertyNames), &propertyIndex))
         {
             switch(propertyIndex)
             {
@@ -1158,7 +1169,7 @@ void readGltfMeshes(gltf_parser_context_t* pParserContext, memory_allocator_t* p
             openGltfObject(pParserContext, &pObjectName);
 
                 int propertyIndex = ~0;
-                if(areStringsEqual32<2>(pObjectName, validMeshPropertyNames, &propertyIndex))
+                if(areStringsEqual32(pObjectName, validMeshPropertyNames, ARRAY_SIZE(validMeshPropertyNames), &propertyIndex))
                 {
                     if(propertyIndex == meshPrimitivesIndex)
                     {
@@ -1289,7 +1300,7 @@ void readGltfAccessors(gltf_parser_context_t* pParserContext, memory_allocator_t
             char* pObjectName = nullptr;
             openGltfObject(pParserContext, &pObjectName);
             int propertyIndex = 0;
-            if(areStringsEqual32<5>(pObjectName, validAccessorPropertyNames, &propertyIndex))
+            if(areStringsEqual32(pObjectName, validAccessorPropertyNames, ARRAY_SIZE(validAccessorPropertyNames), &propertyIndex))
             {
                 if(propertyIndex == bufferViewIndex)
                 {
