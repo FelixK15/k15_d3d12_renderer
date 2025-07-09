@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Launch samples",
+            "name": "Launch samples (debug)",
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/win32/build/debug/samples.exe",
@@ -15,43 +15,13 @@
             "environment": []
         },
         {
-            "name": "Launch debug clear backbuffer",
+            "name": "Launch samples (release)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/clear_backbuffer/debug/clear_backbuffer.exe",
+            "program": "${workspaceFolder}/win32/build/release/samples.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/clear_backbuffer/debug",
-            "environment": []
-        },
-        {
-            "name": "Launch debug render triangle",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/win32/build/render_triangle/debug/render_triangle.exe",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/render_triangle/debug",
-            "environment": []
-        },
-        {
-            "name": "Launch debug spinning cube",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/win32/build/spinning_cube/debug/spinning_cube.exe",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/spinning_cube/debug",
-            "environment": []
-        },
-        {
-            "name": "Launch debug compute texture",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/win32/build/compute_texture/debug/compute_texture.exe",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/compute_texture/debug",
+            "cwd": "${workspaceFolder}/win32/build/release",
             "environment": []
         }
     ]

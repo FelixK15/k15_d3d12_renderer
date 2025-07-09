@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <stdio.h>
+#include <malloc.h>
 
 #define USE_D3D12_DEBUG 1
 #define USE_VALIDATION 1
