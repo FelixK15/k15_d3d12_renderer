@@ -8,11 +8,12 @@
             "type": "shell",
             "windows": {
                 "options": {
-                    "cwd": "${workspaceFolder}/win32"
+                    "cwd": "${workspaceFolder}"
                 },
-                "command": "build.bat",
+                "command": "k15_build_system.exe",
                 "args": [
-                    "debug"
+                   "--buildconfig",
+                   "Debug"
                 ],
                 "problemMatcher": [
                     "$msCompile"
@@ -31,11 +32,12 @@
             "type": "shell",
             "windows": {
                 "options": {
-                    "cwd": "${workspaceFolder}/win32"
+                    "cwd": "${workspaceFolder}"
                 },
-                "command": "build.bat",
+                "command": "k15_build_system.exe",
                 "args": [
-                    "release"
+                   "--buildconfig",
+                   "Release"
                 ],
                 "problemMatcher": [
                     "$msCompile"

@@ -28,8 +28,8 @@
 #pragma comment(lib, "D3d12.lib")
 #pragma comment(lib, "DXGI.lib")
 #pragma comment(lib, "dxguid.lib")
-#pragma comment(lib, "x64/dxcompiler.lib")
-#pragma comment(lib, "x64/WinPixEventRuntime.lib")
+#pragma comment(lib, "win32/x64/dxcompiler.lib")
+#pragma comment(lib, "win32/x64/WinPixEventRuntime.lib")
 
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
@@ -2964,7 +2964,7 @@ bool createGraphicsFrame(graphics_frame_t* pOutGraphicFrame, memory_allocator_t*
         return false;
     }
 
-    graphics_frame_t graphicsFrame = {0};
+    graphics_frame_t graphicsFrame = {};
     graphicsFrame.ppFrameFences = ppFences;
     graphicsFrame.pMemoryAllocator = pMemoryAllocator;
     graphicsFrame.pFrameFinishedEvent = CreateEvent(nullptr, TRUE, TRUE, "");

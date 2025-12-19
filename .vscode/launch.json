@@ -8,20 +8,20 @@
             "name": "Launch samples (debug)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/debug/samples.exe",
+            "program": "${workspaceFolder}/build/output/Debug/samples.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/debug",
+            "cwd": "${workspaceFolder}/build/output/Debug",
             "environment": []
         },
         {
             "name": "Launch samples (release)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/win32/build/release/samples.exe",
+            "program": "${workspaceFolder}/build/output/Release/samples.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/win32/build/release",
+            "cwd": "${workspaceFolder}/build/output/Release",
             "environment": []
         }
     ]
